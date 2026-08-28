@@ -11,6 +11,7 @@ on:
 jobs:
   lean-release-tag:
     name: Add Lean release tag
+    if: github.event.before != '0000000000000000000000000000000000000000'
     runs-on: ubuntu-latest
     permissions:
       contents: write
