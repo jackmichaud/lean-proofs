@@ -6,3 +6,5 @@ Authors: Jack Michaud
 
 import Leanproofs.Basic
 import Leanproofs.Fermat
+import Leanproofs.Registry
+import Leanproofs.Catalog
