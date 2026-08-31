@@ -75,12 +75,22 @@ def certificateShapeIsValid (env : Environment) (entry : Entry)
   | none => false
   | some statement =>
       match entry.status with
-      | .proved =>
+      | .conditional | .proved | .independent | .undecidable =>
           Kernel.isDefEqGuarded env {} certificateInfo.type statement
       | .disproved =>
           let negated := mkApp (.const ``Not []) statement
           Kernel.isDefEqGuarded env {} certificateInfo.type negated
       | _ => true
+
+def evidenceMatchesStatus (status : Status) (evidence? : Option EvidenceKind) : Bool :=
+  match status, evidence? with
+  | .formalizing, none | .open, none => true
+  | .conditional, some .conditionalProof => true
+  | .proved, some .proof => true
+  | .disproved, some .counterexample => true
+  | .independent, some .modelConstruction | .independent, some .metatheorem => true
+  | .undecidable, some .reduction | .undecidable, some .metatheorem => true
+  | _, _ => false
 
 def prettyType (env : Environment) (info : ConstantInfo) : IO String := do
   let rendered ← PrettyPrinter.ppExprLegacy env {} {} {} info.type
@@ -134,7 +144,7 @@ def auditEntry (env : Environment) (entry : Entry) : IO Audit := do
           errors := errors.push s!"certificate declaration '{certificate}' does not exist"
       | some certificateInfo =>
           certificateType? := some (← prettyType env certificateInfo)
-          if !entry.status.isClosed && entry.status != .conditional then
+          if !entry.status.isClosed then
             errors := errors.push
               s!"status '{entry.status.toString}' cannot have a closing certificate"
           match certificateInfo with
@@ -153,6 +163,10 @@ def auditEntry (env : Environment) (entry : Entry) : IO Audit := do
     errors := errors.push "entry title cannot be empty"
   if entry.evidence?.isNone && entry.certificate?.isSome then
     errors := errors.push "a certificate requires an evidence kind"
+  if !evidenceMatchesStatus entry.status entry.evidence? then
+    let evidence := entry.evidence?.map EvidenceKind.toString |>.getD "none"
+    errors := errors.push
+      s!"evidence '{evidence}' is incompatible with status '{entry.status.toString}'"
   return {
     entry
     statementType
@@ -298,6 +312,42 @@ def runSearch (env : Environment) (query : String) (limit : Nat := 25) : IO UInt
       IO.println s!"{name} : {← prettyType env info}"
   return 0
 
+def genericConstants : NameSet :=
+  [``Eq, ``Ne, ``Not, ``And, ``Or, ``Exists, ``True, ``False, ``Iff,
+    ``OfNat.ofNat, ``HPow.hPow, ``HAdd.hAdd, ``HSub.hSub, ``HMul.hMul]
+    |>.foldl (init := {}) NameSet.insert
+
+def suggestionScore (target : NameSet) (info : ConstantInfo) : Nat :=
+  let candidate := info.type.getUsedConstantsAsSet
+  target.toArray.foldl (init := 0) fun score name =>
+    if !genericConstants.contains name && candidate.contains name then score + 1 else score
+
+def runSuggest (env : Environment) (id : String) (limit : Nat := 15) : IO UInt32 := do
+  let some entry := findEntry? id | do
+    IO.eprintln s!"unknown registry id '{id}'"
+    return 1
+  let some statementInfo := env.find? entry.statement | do
+    IO.eprintln s!"statement declaration '{entry.statement}' does not exist"
+    return 1
+  let target := statementInfo.type.getUsedConstantsAsSet
+  let mut suggestions : Array (Nat × Name × ConstantInfo) := #[]
+  for (name, info) in env.constants.toList do
+    match info with
+    | .thmInfo _ =>
+        let score := suggestionScore target info
+        let printable := !name.toString.startsWith "_private" && name != entry.statement
+        if score > 0 && printable then
+          suggestions := suggestions.push (score, name, info)
+    | _ => pure ()
+  suggestions := suggestions.qsort fun left right =>
+    left.1 > right.1 || (left.1 == right.1 && Name.lt left.2.1 right.2.1)
+  IO.println s!"Reusable theorem candidates for {entry.title}:"
+  for (score, name, info) in suggestions.take limit do
+    IO.println s!"[{score}] {name} : {← prettyType env info}"
+  if suggestions.isEmpty then
+    IO.println "No candidates shared non-generic statement constants."
+  return 0
+
 def runGraph (env : Environment) : IO UInt32 := do
   let (audits, _) ← auditCatalog env
   IO.println "flowchart LR"
@@ -324,6 +374,7 @@ def printHelp : IO Unit :=
       lake exe frontier list [query]\n\
       lake exe frontier show <id>\n\
       lake exe frontier search <Lean declaration name>\n\
+      lake exe frontier suggest <registry id>\n\
       lake exe frontier graph\n\
       lake exe frontier export [path]\n\n\
     The default export path is build/frontier.json."
@@ -344,6 +395,7 @@ def run (args : List String) : IO UInt32 := do
       | "show", [id] => runShow env id
       | "search", [] => IO.eprintln "search requires a query" *> pure 1
       | "search", query => runSearch env (" ".intercalate query)
+      | "suggest", [id] => runSuggest env id
       | "graph", [] => runGraph env
       | "export", [] => runExport env "build/frontier.json"
       | "export", [path] => runExport env path

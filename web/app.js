@@ -105,7 +105,7 @@ function renderTopics() {
 
 function renderOverview() {
   const proved = state.entries.filter((entry) => entry.status === "proved").length;
-  const unresolved = state.entries.filter((entry) => ["open", "formalizing", "conditional"].includes(entry.status)).length;
+  const unresolved = state.entries.filter((entry) => ["open", "formalizing"].includes(entry.status)).length;
   const edgeCount = state.entries.reduce((total, entry) => total + entry.dependencies.length, 0);
   const reused = new Set(state.entries.flatMap((entry) => entry.dependencies)).size;
   const metricData = [

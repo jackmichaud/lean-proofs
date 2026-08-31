@@ -35,7 +35,7 @@ def Status.toString : Status → String
   | .undecidable => "undecidable"
 
 def Status.isClosed : Status → Bool
-  | .proved | .disproved | .independent | .undecidable => true
+  | .conditional | .proved | .disproved | .independent | .undecidable => true
   | _ => false
 
 /-- The kind of kernel-checked evidence attached to a closed claim. -/
