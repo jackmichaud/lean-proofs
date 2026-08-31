@@ -1,0 +1,246 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="description" content="Frontier, a Lean-checked mathematical research registry." />
+    <title>Frontier</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <button class="icon-button menu-button" id="menu-button" aria-label="Open navigation" title="Open navigation">
+        <span aria-hidden="true">☰</span>
+      </button>
+      <a class="brand" href="#overview" aria-label="Frontier overview">
+        <span class="brand-mark" aria-hidden="true">F</span>
+        <span>Frontier</span>
+      </a>
+      <div class="kernel-state" id="kernel-state">
+        <span class="state-dot"></span>
+        <span>Loading registry</span>
+      </div>
+      <button class="primary-button" id="new-conjecture-button">
+        <span class="wide-label">New conjecture</span><span class="narrow-label">New</span>
+      </button>
+    </header>
+
+    <div class="app-shell">
+      <aside class="sidebar" id="sidebar">
+        <nav aria-label="Primary navigation">
+          <a class="nav-item active" href="#overview" data-view="overview">
+            <span class="nav-symbol" aria-hidden="true">⌂</span>Overview
+          </a>
+          <a class="nav-item" href="#library" data-view="library">
+            <span class="nav-symbol" aria-hidden="true">≡</span>Theorem library
+            <span class="nav-count" id="library-count">0</span>
+          </a>
+          <a class="nav-item" href="#dependencies" data-view="dependencies">
+            <span class="nav-symbol" aria-hidden="true">⌘</span>Dependencies
+          </a>
+          <a class="nav-item" href="#queue" data-view="queue">
+            <span class="nav-symbol" aria-hidden="true">◇</span>Research queue
+            <span class="nav-count" id="queue-count">0</span>
+          </a>
+        </nav>
+
+        <section class="sidebar-section">
+          <h2>Topics</h2>
+          <div id="topic-links"></div>
+        </section>
+
+        <div class="sidebar-footer">
+          <span>Lean 4.33.1</span>
+          <span>Catalog schema v1</span>
+        </div>
+      </aside>
+
+      <main class="workspace">
+        <section class="view active" id="overview-view" data-view="overview">
+          <div class="view-header">
+            <div>
+              <p class="eyebrow">Research state</p>
+              <h1>Frontier overview</h1>
+            </div>
+            <span class="updated-label" id="updated-label"></span>
+          </div>
+
+          <div class="metrics" id="metrics"></div>
+
+          <div class="overview-grid">
+            <section class="panel recent-panel">
+              <div class="panel-header">
+                <div>
+                  <p class="eyebrow">Verified artifacts</p>
+                  <h2>Recent results</h2>
+                </div>
+                <a href="#library" class="text-link">View library →</a>
+              </div>
+              <div id="recent-results" class="result-list"></div>
+            </section>
+
+            <section class="panel queue-panel">
+              <div class="panel-header">
+                <div>
+                  <p class="eyebrow">Active work</p>
+                  <h2>Research queue</h2>
+                </div>
+                <a href="#queue" class="text-link">Open queue →</a>
+              </div>
+              <div id="queue-preview" class="queue-preview"></div>
+            </section>
+          </div>
+
+          <section class="panel lineage-panel">
+            <div class="panel-header">
+              <div>
+                <p class="eyebrow">Reuse</p>
+                <h2>Proof lineage</h2>
+              </div>
+              <span class="subtle" id="edge-count"></span>
+            </div>
+            <div class="lineage-strip" id="lineage-strip"></div>
+          </section>
+        </section>
+
+        <section class="view" id="library-view" data-view="library">
+          <div class="view-header library-heading">
+            <div>
+              <p class="eyebrow">Lean environment</p>
+              <h1>Theorem library</h1>
+            </div>
+            <div class="search-wrap">
+              <span aria-hidden="true">⌕</span>
+              <input id="library-search" type="search" placeholder="Search names, types, tags" aria-label="Search theorem library" />
+            </div>
+          </div>
+
+          <div class="filter-bar">
+            <div class="segmented-control" id="status-filter" aria-label="Filter by status">
+              <button class="active" data-status="all">All</button>
+              <button data-status="proved">Proved</button>
+              <button data-status="disproved">Disproved</button>
+              <button data-status="open">Open</button>
+              <button data-status="undecidable">Undecidable</button>
+            </div>
+            <select id="topic-filter" aria-label="Filter by topic">
+              <option value="all">All topics</option>
+            </select>
+          </div>
+
+          <div class="library-layout">
+            <section class="table-panel">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Result</th>
+                    <th>Status</th>
+                    <th>Topic</th>
+                    <th>Dependencies</th>
+                    <th>Updated</th>
+                  </tr>
+                </thead>
+                <tbody id="theorem-rows"></tbody>
+              </table>
+              <div class="empty-state hidden" id="library-empty">No matching results.</div>
+            </section>
+            <aside class="detail-panel" id="detail-panel" aria-live="polite"></aside>
+          </div>
+        </section>
+
+        <section class="view" id="dependencies-view" data-view="dependencies">
+          <div class="view-header">
+            <div>
+              <p class="eyebrow">Knowledge graph</p>
+              <h1>Proof dependencies</h1>
+            </div>
+            <div class="graph-legend">
+              <span><i class="legend-dot verified"></i>Verified</span>
+              <span><i class="legend-line"></i>Uses</span>
+            </div>
+          </div>
+          <section class="graph-stage" id="graph-stage">
+            <svg id="graph-lines" aria-hidden="true"></svg>
+            <div id="graph-nodes"></div>
+          </section>
+          <section class="panel graph-selection" id="graph-selection"></section>
+        </section>
+
+        <section class="view" id="queue-view" data-view="queue">
+          <div class="view-header">
+            <div>
+              <p class="eyebrow">Conjecture intake</p>
+              <h1>Research queue</h1>
+            </div>
+            <div class="header-actions">
+              <button class="secondary-button" id="export-queue-button">Export queue</button>
+              <button class="primary-button" id="queue-new-button">New conjecture</button>
+            </div>
+          </div>
+          <div class="queue-board" id="queue-board"></div>
+        </section>
+      </main>
+    </div>
+
+    <dialog id="conjecture-dialog">
+      <form method="dialog" id="conjecture-form">
+        <div class="dialog-header">
+          <div>
+            <p class="eyebrow">Research intake</p>
+            <h2 id="dialog-title">New conjecture</h2>
+          </div>
+          <button class="icon-button" value="cancel" aria-label="Close" title="Close">×</button>
+        </div>
+        <input type="hidden" id="conjecture-id" />
+        <label>
+          Title
+          <input id="conjecture-title" required maxlength="120" />
+        </label>
+        <div class="form-row">
+          <label>
+            Topic
+            <input id="conjecture-topic" required placeholder="number-theory" />
+          </label>
+          <label>
+            Priority
+            <select id="conjecture-priority">
+              <option value="high">High</option>
+              <option value="normal" selected>Normal</option>
+              <option value="low">Low</option>
+            </select>
+          </label>
+        </div>
+        <label>
+          Informal statement
+          <textarea id="conjecture-informal" required rows="4"></textarea>
+        </label>
+        <label>
+          Lean proposition
+          <textarea id="conjecture-formal" rows="4" spellcheck="false" placeholder="∀ n : ℕ, ..."></textarea>
+        </label>
+        <div class="dialog-actions">
+          <button class="secondary-button" value="cancel">Cancel</button>
+          <button class="primary-button" id="save-conjecture-button" value="default">Save conjecture</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="scaffold-dialog" class="scaffold-dialog">
+      <div class="dialog-header">
+        <div>
+          <p class="eyebrow">Lean artifact</p>
+          <h2>Research scaffold</h2>
+        </div>
+        <button class="icon-button" id="close-scaffold-button" aria-label="Close" title="Close">×</button>
+      </div>
+      <pre><code id="scaffold-code"></code></pre>
+      <div class="dialog-actions">
+        <button class="secondary-button" id="copy-scaffold-button">Copy</button>
+        <button class="primary-button" id="download-scaffold-button">Download .lean</button>
+      </div>
+    </dialog>
+
+    <div class="toast" id="toast" role="status" aria-live="polite"></div>
+    <script src="app.js" defer></script>
+  </body>
+</html>
