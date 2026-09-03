@@ -5,11 +5,10 @@ on:
   pull_request:
   workflow_dispatch:
 
-# Sets permissions of the GITHUB_TOKEN to allow deployment to GitHub Pages
 permissions:
-  contents: read # Read access to repository contents
-  pages: write # Write access to GitHub Pages
-  id-token: write # Write access to ID tokens
+  contents: read
+  pages: write
+  id-token: write
 
 jobs:
   build:
@@ -18,4 +17,41 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: leanprover/lean-action@v1
+
+      # Everything below is the trust gate. `lean-action` only proves the project compiles;
+      # it says nothing about whether catalog metadata matches the compiled declarations,
+      # whether certificates rest on allowlisted axioms, or whether the published web catalog
+      # still agrees with the registry. Those are the claims this project makes, so they run
+      # on every push and pull request.
+      # `lean-action` builds the default targets, but be explicit: the executable's root does
+      # not import the catalog, so building only `frontier` would leave the audit reading
+      # stale oleans.
+      - name: Audit the registry against the compiled environment
+        run: |
+          lake build Leanproofs frontier
+          lake exe frontier validate
+
+      - name: Check the published catalog matches the registry
+        run: |
+          lake exe frontier export build/frontier.check.json
+          python3 scripts/compare-catalog.py build/frontier.check.json web/data/catalog.json
+
+      - name: Check web workspace syntax
+        run: |
+          node --check web/app.js
+          node --check scripts/browser-qa.mjs
+
+      - name: Drive the web workspace in a browser
+        env:
+          # A browser is always available on the runner, so a skip here would mean the check
+          # silently stopped running.
+          FRONTIER_REQUIRE_BROWSER: "1"
+        run: |
+          google-chrome --headless=new --remote-debugging-port=9222 --no-sandbox about:blank &
+          for _ in $(seq 1 30); do
+            curl -sf http://127.0.0.1:9222/json/version >/dev/null && break
+            sleep 1
+          done
+          make browser-qa
+
       - uses: leanprover-community/docgen-action@v1

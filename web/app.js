@@ -1,8 +1,14 @@
+// Schema this UI understands. `frontier export` stamps every catalog with its version; a
+// mismatch means the page would silently render a stale or partial view of the registry, so
+// say so instead.
+const SUPPORTED_SCHEMA_VERSION = 2;
+
 const state = {
   catalog: null,
   entries: [],
   selectedId: null,
   status: "all",
+  literature: "all",
   topic: "all",
   query: "",
   queue: loadQueue(),
@@ -22,6 +28,9 @@ async function init() {
     const response = await fetch("data/catalog.json", { cache: "no-store" });
     if (!response.ok) throw new Error(`Catalog request failed: ${response.status}`);
     state.catalog = await response.json();
+    if (state.catalog.schemaVersion !== SUPPORTED_SCHEMA_VERSION) {
+      throw new Error(`Catalog schema v${state.catalog.schemaVersion} but this workspace reads v${SUPPORTED_SCHEMA_VERSION}. Run \`make catalog\`.`);
+    }
     state.entries = state.catalog.entries;
     state.selectedId = state.entries[0]?.id ?? null;
     renderCatalog();
@@ -48,6 +57,10 @@ function bindControls() {
   });
   $("#topic-filter").addEventListener("change", (event) => {
     state.topic = event.target.value;
+    renderLibrary();
+  });
+  $("#literature-filter").addEventListener("change", (event) => {
+    state.literature = event.target.value;
     renderLibrary();
   });
   $("#status-filter").addEventListener("click", (event) => {
@@ -78,6 +91,7 @@ function renderCatalog() {
   kernel.classList.add(allValid ? "verified" : "invalid");
   $("#kernel-state span:last-child").textContent = allValid ? "Kernel audit verified" : "Registry audit failed";
   $("#library-count").textContent = state.entries.length;
+  $("#schema-label").textContent = `Catalog schema v${state.catalog.schemaVersion}`;
   const latest = [...state.entries].sort((a, b) => b.updated.localeCompare(a.updated))[0]?.updated;
   $("#updated-label").textContent = latest ? `Updated ${formatDate(latest)}` : "";
   renderTopics();
@@ -105,13 +119,20 @@ function renderTopics() {
 
 function renderOverview() {
   const proved = state.entries.filter((entry) => entry.status === "proved").length;
-  const unresolved = state.entries.filter((entry) => ["open", "formalizing"].includes(entry.status)).length;
+  // The two reasons an entry is unresolved here are completely different, and collapsing them
+  // is what makes a registry misleading. A known theorem we have not typed in is formalization
+  // backlog; a claim mathematics has not settled is the actual research frontier.
+  const unformalized = state.entries.filter((entry) =>
+    ["open", "formalizing"].includes(entry.status) && entry.literature !== "unresolved");
+  const researchFrontier = state.entries.filter((entry) =>
+    !isClosedStatus(entry.status) && entry.literature === "unresolved");
   const edgeCount = state.entries.reduce((total, entry) => total + entry.dependencies.length, 0);
   const reused = new Set(state.entries.flatMap((entry) => entry.dependencies)).size;
   const metricData = [
     ["Cataloged artifacts", state.entries.length, `${state.catalog.summary.valid} kernel-audited`],
-    ["Proved", proved, `${Math.round((proved / Math.max(state.entries.length, 1)) * 100)}% of registry`],
-    ["Open frontier", unresolved + state.queue.length, `${state.queue.length} in research queue`],
+    ["Proved here", proved, `${Math.round((proved / Math.max(state.entries.length, 1)) * 100)}% of registry`],
+    ["Research frontier", researchFrontier.length + state.queue.length, `unresolved in the literature · ${state.queue.length} in queue`],
+    ["Formalization backlog", unformalized.length, "known results, not yet checked here"],
     ["Reusable results", reused, `${edgeCount} proof dependencies`],
   ];
   $("#metrics").innerHTML = metricData.map(([label, value, note]) => `
@@ -153,6 +174,7 @@ function renderLineage() {
 function filteredEntries() {
   return state.entries.filter((entry) => {
     if (state.status !== "all" && entry.status !== state.status) return false;
+    if (state.literature !== "all" && entry.literature !== state.literature) return false;
     if (state.topic !== "all" && entry.topic !== state.topic) return false;
     if (!state.query) return true;
     return [entry.id, entry.title, entry.summary, entry.statement, entry.statementType, ...entry.tags]
@@ -168,7 +190,7 @@ function renderLibrary() {
     <tr data-row-id="${entry.id}" class="${entry.id === state.selectedId ? "selected" : ""}">
       <td><span class="table-title">${escapeHtml(entry.title)}</span><span class="table-decl mono">${escapeHtml(entry.statement)}</span></td>
       <td>${statusBadge(entry.status)}</td>
-      <td>${escapeHtml(displayTopic(entry.topic))}</td>
+      <td>${literatureBadge(entry.literature)}</td>
       <td>${entry.dependencies.length}</td>
       <td>${formatDate(entry.updated)}</td>
     </tr>`).join("");
@@ -188,19 +210,35 @@ function renderDetail(entry) {
   const dependencies = entry.dependencies.length
     ? entry.dependencies.map((id) => `<button class="dependency-link" data-dependency-id="${id}">${escapeHtml(titleFor(id))} →</button>`).join("")
     : `<span class="subtle">No catalog dependencies</span>`;
+  const sanityChecks = (entry.sanityChecks ?? []).length
+    ? (entry.sanityChecks ?? []).map((check) => `<div class="trust-row"><code>${escapeHtml(check.name)}</code></div><pre class="type-block">${escapeHtml(check.type)}</pre>`).join("")
+    : `<span class="subtle">None</span>`;
   $("#detail-panel").innerHTML = `
-    ${statusBadge(entry.status)}
+    <div class="tag-row">${statusBadge(entry.status)}${literatureBadge(entry.literature)}</div>
     <h2>${escapeHtml(entry.title)}</h2>
     <p class="detail-summary">${escapeHtml(entry.summary)}</p>
-    <div class="detail-section"><span class="detail-label">Lean statement</span><pre class="type-block">${escapeHtml(entry.statementType)}</pre></div>
+    ${formalizationNote(entry)}
+    <div class="detail-section"><span class="detail-label">Lean proposition</span><pre class="type-block">${escapeHtml(entry.statementType)}</pre></div>
     <div class="detail-section"><span class="detail-label">Dependencies</span>${dependencies}</div>
     <div class="detail-section"><span class="detail-label">Tags</span><div class="tag-row">${entry.tags.map((tag) => `<span class="tag">${escapeHtml(tag)}</span>`).join("")}</div></div>
     <div class="detail-section">
       <span class="detail-label">Trust audit</span>
       <div class="trust-row"><span>Certificate</span><code>${escapeHtml(entry.certificate || "none")}</code></div>
       <div class="trust-row"><span>Evidence</span><strong>${escapeHtml(entry.evidence || "none")}</strong></div>
+      ${entry.baseTheory ? `<div class="trust-row"><span>Relative to</span><strong>${escapeHtml(entry.baseTheory)}</strong></div>` : ""}
       <div class="trust-row"><span>Axioms</span><strong>${entry.axioms.length}</strong></div>
       <div class="tag-row">${entry.axioms.map((axiom) => `<span class="tag">${escapeHtml(axiom)}</span>`).join("") || `<span class="tag">axiom-free</span>`}</div>
+    </div>
+    <div class="detail-section">
+      <span class="detail-label">Sanity checks</span>
+      <p class="subtle">Checked lemmas guarding against mis-formalization. Not research results.</p>
+      ${sanityChecks}
+    </div>
+    <div class="detail-section">
+      <span class="detail-label">Provenance</span>
+      <div class="trust-row"><span>Authors</span><strong>${escapeHtml(entry.authors.join(", ") || "none")}</strong></div>
+      ${(entry.tooling ?? []).length ? `<div class="trust-row"><span>Tooling</span><strong>${escapeHtml((entry.tooling ?? []).join(", "))}</strong></div>` : ""}
+      ${entry.citation ? `<p class="detail-summary">${escapeHtml(entry.citation)}</p>` : ""}
     </div>`;
   $$("[data-dependency-id]", $("#detail-panel")).forEach((button) => button.addEventListener("click", () => {
     state.selectedId = button.dataset.dependencyId;
@@ -383,8 +421,33 @@ function downloadBlob(blob, filename) {
   URL.revokeObjectURL(url);
 }
 
+const CLOSED_STATUSES = ["conditional", "proved", "disproved", "independent", "undecidable"];
+
+function isClosedStatus(status) {
+  return CLOSED_STATUSES.includes(status);
+}
+
 function statusBadge(status) {
-  return `<span class="status-badge status-${escapeHtml(status)}">${escapeHtml(status)}</span>`;
+  return `<span class="status-badge status-${escapeHtml(status)}" title="What this repository has checked">${escapeHtml(status)}</span>`;
+}
+
+function literatureBadge(literature) {
+  const label = literature === "unresolved" ? "open problem" : `lit: ${literature}`;
+  return `<span class="status-badge literature-${escapeHtml(literature)}" title="What the mathematical literature knows, independent of this repository">${escapeHtml(label)}</span>`;
+}
+
+/** Spell out the status/literature combination in words, since the pair is the whole point. */
+function formalizationNote(entry) {
+  if (!isClosedStatus(entry.status) && entry.literature === "unresolved") {
+    return `<p class="detail-note">Unresolved in the literature and unresolved here. This is a genuine research target.</p>`;
+  }
+  if (!isClosedStatus(entry.status)) {
+    return `<p class="detail-note">Settled in the literature (${escapeHtml(entry.literature)}) but not yet formalized in this repository. This is a formalization task, not an open problem.</p>`;
+  }
+  if (entry.literature === "unresolved") {
+    return `<p class="detail-note">Checked here by Lean, with no literature reference recorded. Verify this is genuinely new before citing it as such.</p>`;
+  }
+  return "";
 }
 
 function titleFor(id) {

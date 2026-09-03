@@ -116,6 +116,14 @@ h2 { margin-bottom: 0; font-size: 17px; line-height: 1.3; letter-spacing: 0; }
 .status-disproved { color: var(--red); background: var(--red-soft); }
 .status-open, .status-formalizing, .status-conditional { color: var(--amber); background: var(--amber-soft); }
 .status-undecidable, .status-independent { color: var(--blue); background: var(--blue-soft); }
+/* Literature state is a different axis from formalization status, so it is deliberately
+   rendered as an outline rather than a fill: the filled badge always means "checked here". */
+.status-badge[class*="literature-"] { background: transparent; box-shadow: inset 0 0 0 1px currentcolor; text-transform: none; }
+.literature-proved { color: var(--green); }
+.literature-disproved { color: var(--red); }
+.literature-folklore { color: var(--muted); }
+.literature-unresolved { color: var(--blue); }
+.detail-note { margin: 0 0 16px; padding: 10px 12px; color: var(--muted); background: var(--soft-line); border-radius: 5px; font-size: 12px; line-height: 1.55; }
 .dependency-count { color: var(--muted); font-size: 12px; text-align: right; }
 
 .queue-preview { min-height: 270px; }

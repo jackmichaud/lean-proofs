@@ -51,7 +51,7 @@
 
         <div class="sidebar-footer">
           <span>Lean 4.33.1</span>
-          <span>Catalog schema v1</span>
+          <span id="schema-label">Catalog schema</span>
         </div>
       </aside>
 
@@ -116,13 +116,20 @@
           </div>
 
           <div class="filter-bar">
-            <div class="segmented-control" id="status-filter" aria-label="Filter by status">
+            <div class="segmented-control" id="status-filter" aria-label="Filter by formalization status in this repository">
               <button class="active" data-status="all">All</button>
               <button data-status="proved">Proved</button>
               <button data-status="disproved">Disproved</button>
               <button data-status="open">Open</button>
               <button data-status="undecidable">Undecidable</button>
             </div>
+            <select id="literature-filter" aria-label="Filter by state in the mathematical literature">
+              <option value="all">Any literature state</option>
+              <option value="unresolved">Unresolved in literature</option>
+              <option value="proved">Proved in literature</option>
+              <option value="disproved">Disproved in literature</option>
+              <option value="folklore">Folklore</option>
+            </select>
             <select id="topic-filter" aria-label="Filter by topic">
               <option value="all">All topics</option>
             </select>
@@ -134,9 +141,9 @@
                 <thead>
                   <tr>
                     <th>Result</th>
-                    <th>Status</th>
-                    <th>Topic</th>
-                    <th>Dependencies</th>
+                    <th>Formalized here</th>
+                    <th>In literature</th>
+                    <th title="Catalog results this proof reuses">Reuses</th>
                     <th>Updated</th>
                   </tr>
                 </thead>
