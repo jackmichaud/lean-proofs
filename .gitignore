@@ -4,3 +4,8 @@ build/
 *.olean
 *.ilean
 *.c
+
+# Scratch Lean that is not part of the build, and therefore is not verified by anything.
+# Nothing in external/ is covered by `lake build` or `frontier validate`; treat a "0 sorries"
+# grep over it as meaningless. Move a file into Leanproofs/ to have it checked.
+external/

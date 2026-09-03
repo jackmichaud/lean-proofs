@@ -5,6 +5,7 @@ Authors: Jack Michaud
 -/
 
 import Leanproofs.Basic
+import Leanproofs.Catalan
 import Leanproofs.Fermat
 import Leanproofs.Registry
 import Leanproofs.Catalog

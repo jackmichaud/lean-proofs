@@ -1,14 +1,63 @@
 #!/usr/bin/env node
 
-import { writeFile } from "node:fs/promises";
+// Drives the Frontier web workspace in a real browser over the Chrome DevTools Protocol.
+//
+// Expectations are derived from web/data/catalog.json rather than hardcoded, so adding a
+// catalog entry does not silently break this check — a hardcoded count turns a passing test
+// into a stale one, which is worse than no test.
+//
+// Requires a Chrome/Chromium listening for CDP, e.g.
+//   chrome --headless=new --remote-debugging-port=9222
+// When no endpoint is reachable the script exits 0 with a SKIPPED notice so that `make check`
+// stays runnable on machines without a browser. Set FRONTIER_REQUIRE_BROWSER=1 in CI to turn
+// that skip into a failure.
+
+import { writeFile, readFile } from "node:fs/promises";
 import { randomBytes } from "node:crypto";
 import net from "node:net";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 const endpoint = process.env.FRONTIER_CDP ?? "http://127.0.0.1:9222";
 const targetUrl = process.env.FRONTIER_URL ?? "http://127.0.0.1:4173/";
-const screenshotPath = process.env.FRONTIER_SCREENSHOT ?? "/private/tmp/frontier-mobile-cdp.png";
+const screenshotPath = process.env.FRONTIER_SCREENSHOT ?? join(tmpdir(), "frontier-mobile-cdp.png");
+const desktopScreenshotPath = process.env.FRONTIER_DESKTOP_SCREENSHOT ?? join(tmpdir(), "frontier-desktop-cdp.png");
+const requireBrowser = process.env.FRONTIER_REQUIRE_BROWSER === "1";
 
-const target = await fetch(`${endpoint}/json/new?${encodeURIComponent(targetUrl)}`, { method: "PUT" }).then((response) => response.json());
+const catalog = JSON.parse(await readFile(new URL("../web/data/catalog.json", import.meta.url), "utf8"));
+
+// Expected page state, computed from the catalog the page will actually load.
+const expected = {
+  entries: catalog.entries.length,
+  graphEdges: catalog.entries.reduce((total, entry) => total + entry.dependencies.length, 0),
+};
+
+// A query that some entry matches and at least one does not, so the filter is really exercised.
+const searchTerm = "integer";
+expected.filteredRows = catalog.entries.filter((entry) =>
+  [entry.id, entry.title, entry.summary, entry.statement, entry.statementType, ...entry.tags]
+    .join(" ").toLowerCase().includes(searchTerm)).length;
+
+if (expected.filteredRows === 0 || expected.filteredRows === expected.entries) {
+  throw new Error(`Search fixture '${searchTerm}' matches ${expected.filteredRows}/${expected.entries} entries; it must match some but not all`);
+}
+
+let target;
+try {
+  const response = await fetch(`${endpoint}/json/new?${encodeURIComponent(targetUrl)}`, { method: "PUT" });
+  if (!response.ok) throw new Error(`CDP responded ${response.status}`);
+  target = await response.json();
+} catch (error) {
+  const message = `browser QA SKIPPED: no CDP endpoint at ${endpoint} (${error.message}).\n`
+    + `  Start one with: chrome --headless=new --remote-debugging-port=9222`;
+  if (requireBrowser) {
+    console.error(message.replace("SKIPPED", "FAILED"));
+    process.exit(1);
+  }
+  console.log(message);
+  process.exit(0);
+}
+
 const socket = await connectWebSocket(target.webSocketDebuggerUrl);
 
 let nextId = 1;
@@ -159,7 +208,16 @@ await call("Emulation.setDeviceMetricsOverride", {
   mobile: true,
 });
 await call("Page.navigate", { url: targetUrl });
-await waitFor("document.readyState === 'complete' && document.querySelector('#library-count')?.textContent === '5'");
+await waitFor("document.readyState === 'complete'");
+
+// The research queue persists in localStorage, so a run that inherits a previous run's queue
+// asserts against the wrong counts. Reset the origin's storage and reload, so the queue
+// assertions below measure only what this run did.
+await evaluate("localStorage.clear()");
+await call("Page.reload", { ignoreCache: true });
+
+await waitFor(`document.readyState === 'complete' && document.querySelector('#library-count')?.textContent === '${expected.entries}'`);
+await waitFor("document.querySelector('#queue-count').textContent === '0'");
 
 const dimensions = await evaluate("({ innerWidth, scrollWidth: document.documentElement.scrollWidth, bodyWidth: document.body.scrollWidth })");
 if (dimensions.innerWidth !== 390 || dimensions.scrollWidth > 390 || dimensions.bodyWidth > 390) {
@@ -180,30 +238,85 @@ await waitFor("document.querySelector('#queue-count').textContent === '1'");
 await evaluate(`(() => {
   location.hash = 'library';
   const input = document.querySelector('#library-search');
-  input.value = 'integer';
+  input.value = ${JSON.stringify(searchTerm)};
   input.dispatchEvent(new Event('input', { bubbles: true }));
 })()`);
-await waitFor("document.querySelectorAll('#theorem-rows tr').length === 2");
+await waitFor(`document.querySelectorAll('#theorem-rows tr').length === ${expected.filteredRows}`);
 
 await evaluate("location.hash = 'dependencies'");
-await waitFor("document.querySelectorAll('.graph-node').length === 5 && document.querySelectorAll('#graph-lines path').length === 4");
+await waitFor(`document.querySelectorAll('.graph-node').length === ${expected.entries} && document.querySelectorAll('#graph-lines path').length === ${expected.graphEdges}`);
 
 await evaluate("location.hash = 'overview'");
 await waitFor("document.querySelector('#overview-view').classList.contains('active')");
 const screenshot = await call("Page.captureScreenshot", { format: "png", captureBeyondViewport: false });
 await writeFile(screenshotPath, Buffer.from(screenshot.data, "base64"));
 
+// Desktop pass. The point of the two-axis schema is that a result settled in the literature
+// but unformalized here reads differently from a genuine open problem, so assert that the
+// detail panel actually says so rather than only that the page renders.
+await call("Emulation.setDeviceMetricsOverride", { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
+
+const twoAxis = catalog.entries.find((entry) =>
+  !["conditional", "proved", "disproved", "independent", "undecidable"].includes(entry.status)
+  && entry.literature !== "unresolved");
+
+let detail = null;
+if (twoAxis) {
+  await evaluate(`(() => {
+    location.hash = 'library';
+    const input = document.querySelector('#library-search');
+    input.value = '';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  })()`);
+  await waitFor(`!!document.querySelector('[data-row-id="${twoAxis.id}"]')`);
+  await evaluate(`document.querySelector('[data-row-id="${twoAxis.id}"]').click()`);
+  await waitFor("!!document.querySelector('#detail-panel .detail-note')");
+
+  detail = await evaluate(`(() => {
+    const panel = document.querySelector('#detail-panel');
+    return {
+      id: ${JSON.stringify(twoAxis.id)},
+      statusBadges: [...panel.querySelectorAll('.status-badge')].map((node) => node.textContent),
+      note: panel.querySelector('.detail-note').textContent,
+      sanityChecks: panel.querySelectorAll('.type-block').length,
+    };
+  })()`);
+
+  if (!detail.statusBadges.some((text) => text.startsWith("lit:"))) {
+    throw new Error(`Detail panel for ${twoAxis.id} shows no literature badge: ${JSON.stringify(detail.statusBadges)}`);
+  }
+  if (!/not yet formalized in this repository/.test(detail.note)) {
+    throw new Error(`Detail panel for ${twoAxis.id} does not distinguish formalization backlog from an open problem: ${detail.note}`);
+  }
+  // Statement proposition plus one block per sanity check.
+  if (detail.sanityChecks !== twoAxis.sanityChecks.length + 1) {
+    throw new Error(`Expected ${twoAxis.sanityChecks.length + 1} type blocks for ${twoAxis.id}, found ${detail.sanityChecks}`);
+  }
+}
+
+const desktopDimensions = await evaluate("({ innerWidth, scrollWidth: document.documentElement.scrollWidth })");
+if (desktopDimensions.scrollWidth > desktopDimensions.innerWidth) {
+  throw new Error(`Desktop overflow: ${JSON.stringify(desktopDimensions)}`);
+}
+
+const desktopShot = await call("Page.captureScreenshot", { format: "png", captureBeyondViewport: false });
+await writeFile(desktopScreenshotPath, Buffer.from(desktopShot.data, "base64"));
+
 if (exceptions.length) throw new Error(`Browser exceptions: ${exceptions.join("; ")}`);
 
 console.log(JSON.stringify({
   dimensions,
-  catalogEntries: 5,
-  filteredRows: 2,
-  graphNodes: 5,
-  graphEdges: 4,
+  desktopDimensions,
+  catalogEntries: expected.entries,
+  searchTerm,
+  filteredRows: expected.filteredRows,
+  graphNodes: expected.entries,
+  graphEdges: expected.graphEdges,
   queueItems: 1,
+  detail,
   exceptions: 0,
   screenshotPath,
+  desktopScreenshotPath,
 }, null, 2));
 
 socket.close();

@@ -19,4 +19,7 @@ name = "Leanproofs"
 
 [[lean_exe]]
 name = "frontier"
-root = "Leanproofs.CLI"
+root = "Leanproofs.Main"
+# The executable imports the project environment at runtime and evaluates `Frontier.catalog`
+# out of it; see Leanproofs/Main.lean for why it cannot simply link the catalog.
+supportInterpreter = true
