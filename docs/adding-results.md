@@ -3,6 +3,51 @@
 Each catalog record connects human research metadata to compiled Lean declarations. Keep theorem
 code in a topic module and metadata in `Leanproofs/Catalog.lean`.
 
+## Work in a draft first
+
+A catalog entry is the *last* step, not the first. Registering a claim means editing two Lean
+files and rebuilding, which is the wrong loop to iterate a proof in. Write a plain `.lean` file
+and check it directly:
+
+```bash
+lake exe frontier check Draft.lean
+```
+
+That elaborates the file against the compiled environment and reports Lean's diagnostics, every
+declaration it defines, the axioms each one rests on, and which catalog results the proofs
+reuse. Nothing touches the registry, and the axiom policy applied is the same code that gates a
+real entry — so a draft that reports clean will not surprise you at `validate` time.
+
+Two limits worth knowing. A draft can only `import` modules that `Leanproofs` already imports,
+because the process cannot pull new modules into a live environment; add the import to the
+project and rebuild if you need one. And elaboration is bounded by `--heartbeats`, because
+non-termination is the ordinary failure mode of a generated proof rather than an edge case.
+
+Once the draft is clean, move it into `Leanproofs/`, import it from `Leanproofs.lean`, and write
+the catalog entry.
+
+### Record it, so it survives
+
+`check` is stateless. Attach it to a work item to keep the current result across sessions:
+
+```bash
+lake exe frontier work add "Formalize X" --goal 'the proposition'
+lake exe frontier check --work formalize-x Draft.lean
+```
+
+The item carries the draft path, the attempt count, and the latest report — axioms, catalog
+reuse, and Lean's diagnostics — which lets a later session resume from the current state. A new
+check replaces that report; the journal does not yet retain each historical run. Append-only
+attempt and check history is planned. A passing check sets the stage to `clean`; a later failing
+one moves it back, so the board cannot advertise a draft that has since broken. When the result
+is registered, close the loop:
+
+```bash
+lake exe frontier work set formalize-x --stage registered --entry <catalog id>
+```
+
+That stage requires a catalog entry that exists, so it cannot be claimed early.
+
 Before writing anything, read the two axes in [architecture.md](architecture.md#two-axes-status-and-literature).
 `status` is what this repository has checked; `literature` is what mathematics knows. Getting
 this pair wrong is the most damaging mistake you can make in the catalog, and validation cannot
@@ -117,9 +162,15 @@ Before starting a proof, inspect existing work:
 
 ```bash
 lake exe frontier search <name-fragment>
+lake exe frontier search <name-fragment> --definitions
 lake exe frontier suggest <registry-id>
+lake exe frontier suggest --goal '<the proposition you are trying to prove>'
 lake exe frontier policy
 ```
+
+`suggest --goal` is the one to reach for on new work: it elaborates the proposition against the
+imported environment and ranks premises for it, so you do not have to register a claim before
+the tool will help you prove it.
 
 Dependencies between registered results are discovered from proof terms on the next validation and
 export; do not maintain them manually.

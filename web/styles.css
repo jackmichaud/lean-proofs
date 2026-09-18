@@ -222,12 +222,43 @@ form input, form select, form textarea { width: 100%; min-height: 39px; padding:
 .toast { position: fixed; z-index: 100; right: 20px; bottom: 20px; padding: 11px 15px; color: #fff; background: #1d2824; border-radius: 5px; box-shadow: var(--shadow); opacity: 0; pointer-events: none; transform: translateY(10px); transition: 160ms ease; }
 .toast.show { opacity: 1; transform: translateY(0); }
 
+/* Work journal. Deliberately not styled like the library: the library is kernel-audited and
+   this is a record of attempts, so the two should not read as the same kind of claim. */
+.view-note { max-width: 760px; margin: 0 0 18px; padding: 11px 13px; color: var(--muted); background: var(--soft-line); border-left: 2px solid var(--line); border-radius: 0 5px 5px 0; font-size: 12px; line-height: 1.6; }
+.view-note code { padding: 1px 4px; background: #dfe5e2; border-radius: 3px; font-size: 11px; }
+.view-note strong { color: var(--ink); }
+.live-indicator { display: inline-flex; gap: 6px; align-items: center; color: var(--muted); font-size: 11px; }
+.live-indicator .state-dot { background: #43c77b; box-shadow: 0 0 0 3px rgb(67 199 123 / 15%); }
+.work-columns { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 14px; align-items: start; }
+.work-column { background: #e9edeb; border: 1px solid var(--line); border-radius: 6px; }
+.work-column .queue-items { display: grid; gap: 10px; padding: 12px; }
+.work-column .subtle { padding: 4px 2px; font-size: 11px; }
+.work-card p { -webkit-line-clamp: 4; }
+.work-note { padding: 7px 9px; background: var(--amber-soft); border-radius: 4px; color: #6b4a12 !important; }
+.work-verdict { display: grid; gap: 3px; margin-bottom: 9px; padding: 8px 9px; border-radius: 4px; font-size: 11px; }
+.work-verdict strong { font-size: 11px; }
+.work-verdict span { color: var(--muted); font-size: 10px; }
+.work-verdict.clean { background: var(--green-soft); color: var(--green); }
+.work-verdict.failed { background: var(--red-soft); color: var(--red); }
+.work-errors { margin: 0 0 9px; padding-left: 15px; color: var(--red); font-size: 10px; line-height: 1.5; }
+.work-errors li { margin-bottom: 3px; word-break: break-word; }
+.work-reuse { margin-bottom: 8px; }
+.work-reuse .detail-label { margin-bottom: 4px; }
+.work-draft { max-width: 110px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.work-stage { padding: 2px 6px; border-radius: 3px; background: #dfe5e2; color: #4c5a54; font-size: 10px; }
+.work-stage.stage-clean { background: var(--green-soft); color: var(--green); }
+.work-stage.stage-blocked { background: var(--red-soft); color: var(--red); }
+.work-stage.stage-registered { background: var(--blue-soft); color: var(--blue); }
+.work-problems { display: grid; gap: 5px; margin-bottom: 14px; padding: 11px 13px; background: var(--red-soft); border-radius: 5px; color: var(--red); font-size: 11px; line-height: 1.5; }
+.empty-queue code { margin-top: 10px; padding: 4px 7px; background: var(--soft-line); border-radius: 3px; font-size: 11px; }
+
 @media (max-width: 1100px) {
   .overview-grid { grid-template-columns: 1fr; }
   .library-layout { grid-template-columns: 1fr; }
   .detail-panel { position: static; min-height: auto; }
   .queue-board { grid-template-columns: 1fr; }
   .queue-column { min-height: auto; }
+  .work-columns { grid-template-columns: 1fr; }
 }
 
 @media (max-width: 760px) {

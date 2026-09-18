@@ -26,10 +26,21 @@ jobs:
       # `lean-action` builds the default targets, but be explicit: the executable's root does
       # not import the catalog, so building only `frontier` would leave the audit reading
       # stale oleans.
-      - name: Audit the registry against the compiled environment
+      # Negative fixtures first. If the audit has stopped rejecting bad entries, a green
+      # `validate` on the six good ones means nothing, so this must fail the build before it.
+      - name: Test that the audit rejects what it is supposed to reject
         run: |
-          lake build Leanproofs frontier
-          lake exe frontier validate
+          lake build Leanproofs frontier frontier-test
+          lake exe frontier-test
+
+      - name: Audit the registry against the compiled environment
+        run: lake exe frontier validate
+
+      # The journal is mutable untrusted data and deliberately not compared against a committed
+      # copy, but every item still has to be readable: a malformed file should fail the build
+      # rather than silently vanish from the board.
+      - name: Read every work journal item
+        run: lake exe frontier work list
 
       - name: Check the published catalog matches the registry
         run: |

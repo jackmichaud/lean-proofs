@@ -19,6 +19,12 @@ Use these terms when searching the docs:
 - `axiom policy`
 - `status and literature`
 - `sanity checks`
+- `draft checking`
+- `json output`
+- `serve`
+- `negative fixtures`
+- `work journal`
+- `submission queue`
 - `sandbox`
 - `Lean verifier`
 - `catalog`

@@ -23,3 +23,10 @@ root = "Leanproofs.Main"
 # The executable imports the project environment at runtime and evaluates `Frontier.catalog`
 # out of it; see Leanproofs/Main.lean for why it cannot simply link the catalog.
 supportInterpreter = true
+
+# Negative fixtures for the audit. `frontier validate` passing on correct entries says nothing
+# about whether an incorrect one would be rejected, which is the only claim that matters.
+[[lean_exe]]
+name = "frontier-test"
+root = "Leanproofs.TestMain"
+supportInterpreter = true

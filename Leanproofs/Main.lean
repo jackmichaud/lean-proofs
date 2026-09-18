@@ -43,4 +43,4 @@ unsafe def main (args : List String) : IO UInt32 := do
   | none =>
       let env ← loadEnvironment
       let catalog ← loadCatalog env
-      Frontier.CLI.run (Frontier.CLI.Context.of env catalog) args
+      Frontier.CLI.run (← Frontier.CLI.Context.default env catalog) args

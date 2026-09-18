@@ -26,10 +26,25 @@ const requireBrowser = process.env.FRONTIER_REQUIRE_BROWSER === "1";
 
 const catalog = JSON.parse(await readFile(new URL("../web/data/catalog.json", import.meta.url), "utf8"));
 
-// Expected page state, computed from the catalog the page will actually load.
+// The work journal is optional — a fresh clone has done no work — so treat a missing file as
+// an empty journal rather than a failure, exactly as the page does.
+let journal = { items: [] };
+try {
+  journal = JSON.parse(await readFile(new URL("../web/data/work.json", import.meta.url), "utf8"));
+} catch (error) {
+  if (error.code !== "ENOENT") throw error;
+}
+
+// Expected page state, computed from the data the page will actually load.
 const expected = {
   entries: catalog.entries.length,
   graphEdges: catalog.entries.reduce((total, entry) => total + entry.dependencies.length, 0),
+  workItems: (journal.items ?? []).length,
+  // The metric the page must *not* inflate: catalog entries unresolved both here and in the
+  // literature. Local notes and journal items are different kinds of thing.
+  researchFrontier: catalog.entries.filter((entry) =>
+    !["conditional", "proved", "disproved", "independent", "undecidable"].includes(entry.status)
+    && entry.literature === "unresolved").length,
 };
 
 // A query that some entry matches and at least one does not, so the filter is really exercised.
@@ -207,7 +222,15 @@ await call("Emulation.setDeviceMetricsOverride", {
   deviceScaleFactor: 1,
   mobile: true,
 });
-await call("Page.navigate", { url: targetUrl });
+// Check the navigation actually landed. Chrome reports a refused connection as an error page
+// rather than a protocol error, and an error page reaches `readyState === 'complete'` with an
+// opaque origin — so without this the run continues and dies at `localStorage.clear()` below
+// with a bare "Uncaught", pointing at the script instead of at the missing server.
+const navigation = await call("Page.navigate", { url: targetUrl });
+if (navigation.errorText) {
+  throw new Error(`Could not load ${targetUrl}: ${navigation.errorText}.`
+    + ` Serve the workspace first — \`make browser-qa\` does it for you.`);
+}
 await waitFor("document.readyState === 'complete'");
 
 // The research queue persists in localStorage, so a run that inherits a previous run's queue
@@ -245,6 +268,59 @@ await waitFor(`document.querySelectorAll('#theorem-rows tr').length === ${expect
 
 await evaluate("location.hash = 'dependencies'");
 await waitFor(`document.querySelectorAll('.graph-node').length === ${expected.entries} && document.querySelectorAll('#graph-lines path').length === ${expected.graphEdges}`);
+
+// The work journal, and the boundary it has to keep. A queue note was added above, so this
+// also pins the fix for the metric that used to sum browser-local notes into a kernel-audited
+// count: with one note present, "Research frontier" must still report only catalog entries.
+await evaluate("location.hash = 'work'");
+await waitFor("document.querySelector('#work-view').classList.contains('active')");
+await waitFor(`document.querySelector('#work-count').textContent === '${expected.workItems}'`);
+
+const work = await evaluate(`(() => {
+  const metric = [...document.querySelectorAll('#metrics .metric')].find((node) =>
+    node.querySelector('.metric-label').textContent === 'Research frontier');
+  const inProgress = [...document.querySelectorAll('#metrics .metric')].find((node) =>
+    node.querySelector('.metric-label').textContent === 'Work in progress');
+  return {
+    cards: document.querySelectorAll('#work-board .work-card').length,
+    columns: document.querySelectorAll('#work-board .work-column').length,
+    note: document.querySelector('#work-view .view-note')?.textContent ?? '',
+    empty: !document.querySelector('#work-empty').classList.contains('hidden'),
+    researchFrontier: metric?.querySelector('.metric-value').textContent,
+    hasInProgressMetric: Boolean(inProgress),
+  };
+})()`);
+
+if (work.cards !== expected.workItems) {
+  throw new Error(`Work board rendered ${work.cards} cards for ${expected.workItems} journal items`);
+}
+if (expected.workItems > 0 && work.empty) {
+  throw new Error("Work board shows its empty state despite having journal items");
+}
+if (!work.columns) {
+  throw new Error("Work board rendered no stage columns");
+}
+// The journal is not evidence, and the page has to say so where it is displayed rather than
+// only in the docs.
+if (!/Not evidence/.test(work.note)) {
+  throw new Error(`Work view does not state that the journal is untrusted: ${work.note}`);
+}
+if (!work.hasInProgressMetric) {
+  throw new Error("Overview is missing the work-in-progress metric");
+}
+// Escaping has to cover the quote characters, not only `&<>`. This output is interpolated into
+// attribute values as well as text, and the obvious implementation — a `textContent` round-trip
+// through a detached node — leaves quotes alone. Journal draft paths are agent-written free
+// text, so one containing `"` would close the attribute and inject markup; with the round-trip
+// implementation a crafted path really does create an element.
+const escaping = await evaluate(`[escapeHtml('a"b'), escapeHtml("c'd"), escapeHtml('e<f>&g')]`);
+if (escaping[0] !== "a&quot;b" || escaping[1] !== "c&#39;d" || escaping[2] !== "e&lt;f&gt;&amp;g") {
+  throw new Error(`escapeHtml does not escape every HTML metacharacter: ${JSON.stringify(escaping)}`);
+}
+
+if (work.researchFrontier !== String(expected.researchFrontier)) {
+  throw new Error(`Research frontier metric reads ${work.researchFrontier}, expected ${expected.researchFrontier} catalog entries — browser-local notes or journal items must not be summed into it`);
+}
 
 await evaluate("location.hash = 'overview'");
 await waitFor("document.querySelector('#overview-view').classList.contains('active')");
@@ -313,6 +389,8 @@ console.log(JSON.stringify({
   graphNodes: expected.entries,
   graphEdges: expected.graphEdges,
   queueItems: 1,
+  workItems: expected.workItems,
+  work,
   detail,
   exceptions: 0,
   screenshotPath,

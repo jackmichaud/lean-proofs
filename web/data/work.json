@@ -1,0 +1,20 @@
+{"trusted": false,
+ "stages": ["exploring", "drafting", "blocked", "clean", "registered", "abandoned"],
+ "schemaVersion": 1,
+ "problems": [],
+ "note": "Work in progress. Untrusted: a record of attempts, not verified results.",
+ "items":
+ [{"updated": "2026-09-08T16:49:00Z",
+   "title": "Probe item",
+   "stage": "exploring",
+   "note": null,
+   "lastCheck": null,
+   "id": "probe-item",
+   "goal": "demo",
+   "entry": null,
+   "draft": null,
+   "created": "2026-09-08T16:49:00Z",
+   "attempts": 0}],
+ "generated": "2026-09-08T16:49:00Z",
+ "counts":
+ {"registered": 0, "exploring": 1, "drafting": 0, "clean": 0, "blocked": 0, "abandoned": 0}}

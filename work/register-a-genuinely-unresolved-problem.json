@@ -1,0 +1,13 @@
+{"updated": "2026-09-04T21:38:29Z",
+ "title": "Register a genuinely unresolved problem",
+ "stage": "exploring",
+ "note":
+ "The substrate is untested against its actual purpose while literatureUnresolved is 0. Needs a research decision about which problem.",
+ "lastCheck": null,
+ "id": "register-a-genuinely-unresolved-problem",
+ "goal":
+ "Add a catalog entry with literature=unresolved, so the registry carries a real research frontier rather than only formalized known results.",
+ "entry": null,
+ "draft": null,
+ "created": "2026-09-04T21:38:29Z",
+ "attempts": 0}
