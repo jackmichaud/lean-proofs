@@ -4,7 +4,7 @@ Released under Apache 2.0 license as described in the file LICENSE.
 Authors: Jack Michaud
 -/
 
-import Leanproofs.Registry
+import Lean
 
 /-!
 # Normalized Frontier knowledge model
@@ -61,6 +61,8 @@ structure Claim where
   topic : String
   tags : Array String := #[]
   authors : Array String := #[]
+  /-- Curatorial context that is not a literature citation. -/
+  source? : Option String := none
   created : String
   updated : String
   deriving BEq, Inhabited, Repr
@@ -81,11 +83,27 @@ structure BaseTheory where
   description : String
   deriving BEq, Inhabited, Repr
 
+/-- The lifecycle of a formalization inside Frontier. This is independent of literature. -/
+inductive RepositoryStatus where
+  | formalizing
+  | open
+  | conditional
+  | proved
+  | disproved
+  | independent
+  | undecidable
+  deriving BEq, DecidableEq, Inhabited, Repr
+
+def RepositoryStatus.isClosed : RepositoryStatus → Bool
+  | .conditional | .proved | .disproved | .independent | .undecidable => true
+  | .formalizing | .open => false
+
 /-- One Lean encoding of a claim. This record makes no assertion that a proof exists. -/
 structure Formalization where
   id : FormalizationId
   claimId : ClaimId
   statement : Lean.Name
+  status : RepositoryStatus
   role : FormalizationRole := .primary
   baseTheory? : Option BaseTheory := none
   /-- Humans responsible for this formal encoding. -/
@@ -186,17 +204,6 @@ structure Relation where
   formalWitness? : Option Lean.Name := none
   deriving BEq, Inhabited, Repr
 
-/-- Compatibility-only fields whose legacy meaning cannot be faithfully inferred. -/
-structure LegacyMetadata where
-  claimId : ClaimId
-  status : Frontier.Status
-  literature : Frontier.Literature
-  citation? : Option String
-  evidence? : Option Frontier.EvidenceKind
-  baseTheory? : Option String
-  source? : Option String
-  deriving BEq, Inhabited, Repr
-
 /-- The normalized knowledge store. Audit results are deliberately not persisted here. -/
 structure Registry where
   claims : Array Claim := #[]
@@ -206,7 +213,76 @@ structure Registry where
   citations : Array Citation := #[]
   literatureAssertions : Array LiteratureAssertion := #[]
   relations : Array Relation := #[]
-  legacy : Array LegacyMetadata := #[]
   deriving BEq, Inhabited, Repr
+
+private def duplicateErrors (kind : String) (ids : Array String) : Array String := Id.run do
+  let mut seen : Std.HashSet String := {}
+  let mut errors := #[]
+  for id in ids do
+    if seen.contains id then
+      errors := errors.push s!"duplicate {kind} id '{id}'"
+    else
+      seen := seen.insert id
+  return errors
+
+/-- Structural errors in the normalized graph. Kernel and policy checks remain the audit's job. -/
+def Registry.validationErrors (registry : Registry) : Array String := Id.run do
+  let mut errors := #[]
+  errors := errors ++ duplicateErrors "claim" (registry.claims.map (·.id.value))
+  errors := errors ++ duplicateErrors "formalization" (registry.formalizations.map (·.id.value))
+  errors := errors ++ duplicateErrors "certificate" (registry.certificates.map (·.id.value))
+  errors := errors ++ duplicateErrors "sanity check" (registry.sanityChecks.map (·.id.value))
+  errors := errors ++ duplicateErrors "citation" (registry.citations.map (·.id.value))
+  errors := errors ++ duplicateErrors "literature assertion"
+    (registry.literatureAssertions.map (·.id.value))
+  errors := errors ++ duplicateErrors "relation" (registry.relations.map (·.id.value))
+
+  for claim in registry.claims do
+    let primaryCount := (registry.formalizations.filter fun item =>
+      item.claimId == claim.id && item.role == .primary).size
+    if primaryCount != 1 then
+      errors := errors.push s!"claim '{claim.id.value}' has {primaryCount} primary formalizations"
+    if !(registry.literatureAssertions.any (·.claimId == claim.id)) then
+      errors := errors.push s!"claim '{claim.id.value}' has no literature assertion"
+  for formalization in registry.formalizations do
+    if !(registry.claims.any (·.id == formalization.claimId)) then
+      errors := errors.push s!"formalization '{formalization.id.value}' references an unknown claim"
+    let attached := registry.certificates.filter (·.formalizationId == formalization.id)
+    if formalization.status.isClosed && attached.size != 1 then
+      errors := errors.push s!"closed formalization '{formalization.id.value}' must have one certificate"
+    if !formalization.status.isClosed && !attached.isEmpty then
+      errors := errors.push s!"open formalization '{formalization.id.value}' cannot have a certificate"
+    for certificate in attached do
+      let expected := if formalization.status == .disproved then .refutes else .affirms
+      if certificate.conclusion != expected then
+        errors := errors.push s!"certificate '{certificate.id.value}' has the wrong conclusion"
+    if let some claim := registry.claims.find? (·.id == formalization.claimId) then
+      let kindMatches := match formalization.status with
+        | .conditional => claim.kind == .conditional
+        | .independent => claim.kind == .independence
+        | .undecidable => claim.kind == .undecidability
+        | _ => true
+      if !kindMatches then
+        errors := errors.push s!"formalization '{formalization.id.value}' disagrees with its claim kind"
+  for certificate in registry.certificates do
+    if !(registry.formalizations.any (·.id == certificate.formalizationId)) then
+      errors := errors.push s!"certificate '{certificate.id.value}' references an unknown formalization"
+  for check in registry.sanityChecks do
+    if !(registry.formalizations.any (·.id == check.formalizationId)) then
+      errors := errors.push s!"sanity check '{check.id.value}' references an unknown formalization"
+  for assertion in registry.literatureAssertions do
+    if !(registry.claims.any (·.id == assertion.claimId)) then
+      errors := errors.push s!"literature assertion '{assertion.id.value}' references an unknown claim"
+    for citationId in assertion.citations do
+      if !(registry.citations.any (·.id == citationId)) then
+        errors := errors.push s!"literature assertion '{assertion.id.value}' references an unknown citation"
+  for relation in registry.relations do
+    if !(registry.claims.any (·.id == relation.source)) ||
+        !(registry.claims.any (·.id == relation.target)) then
+      errors := errors.push s!"relation '{relation.id.value}' references an unknown claim"
+    if let some citationId := relation.citation? then
+      if !(registry.citations.any (·.id == citationId)) then
+        errors := errors.push s!"relation '{relation.id.value}' references an unknown citation"
+  return errors
 
 end Frontier.Knowledge

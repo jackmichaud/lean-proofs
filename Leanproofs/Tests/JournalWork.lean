@@ -69,6 +69,63 @@ def testJournalStorage (suite : Suite) (context : Context) : IO Unit :=
     check suite "published view is untrusted" (trusted? == some false)
     IO.FS.removeFile publishPath
 
+    let batched ← appendResearch context item.id {
+      kind := .agent
+      name := "journal-batch-test"
+      runId := ⟨"journal-batch-test"⟩
+    } #[
+      .metadataUpdated { metadata := {
+        title := item.title
+        goal := "refined goal"
+        note? := some "batched update"
+      } },
+      .stageChanged {
+        fromStage := .exploring
+        toStage := .blocked
+        reason? := some "waiting for a lemma"
+      }
+    ]
+    match batched with
+    | .error message => check suite "multi-event append succeeds" false message
+    | .ok updated =>
+        check suite "multi-event append succeeds"
+          (updated.goal == "refined goal" && updated.stage == .blocked)
+    match ← Research.readEvents context.workRoot ⟨item.id⟩ with
+    | .error message => check suite "batch events are contiguous" false message
+    | .ok events =>
+        check suite "batch events are contiguous"
+          (events.size == 3 && events[1]!.sequence == 2 && events[2]!.sequence == 3)
+        check suite "batch event ids follow their sequences"
+          (events[1]!.eventId.value == "event-2" && events[2]!.eventId.value == "event-3")
+        check suite "batch events share one timestamp"
+          (events[1]!.occurredAt == events[2]!.occurredAt)
+
+    let before ← IO.FS.readFile path
+    let rejected ← appendResearch context item.id {
+      kind := .agent
+      name := "journal-batch-test"
+      runId := ⟨"journal-batch-test"⟩
+    } #[
+      .metadataUpdated { metadata := {
+        title := item.title
+        goal := "must not be written"
+      } },
+      .stageChanged {
+        fromStage := .exploring
+        toStage := .drafting
+      }
+    ]
+    check suite "invalid later payload rejects whole batch"
+      (match rejected with | .error _ => true | .ok _ => false)
+    let after ← IO.FS.readFile path
+    check suite "invalid batch performs no partial write" (after == before)
+    check suite "empty batch is rejected"
+      (match ← appendResearch context item.id {
+        kind := .agent
+        name := "journal-batch-test"
+        runId := ⟨"journal-batch-test"⟩
+      } #[] with | .error _ => true | .ok _ => false)
+
 def testWorkCommands (suite : Suite) (context : Context) : IO Unit :=
   withEmptyJournal context do
     check suite "empty journal lists nothing"

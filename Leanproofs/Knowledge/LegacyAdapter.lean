@@ -5,167 +5,83 @@ Authors: Jack Michaud
 -/
 
 import Leanproofs.Knowledge.Model
+import Leanproofs.Registry
 
 /-!
-# Legacy registry adapter
+# Legacy audit projection
 
-The adapter is deterministic and intentionally conservative. It records legacy classifications
-verbatim when the old schema carries meaning the normalized model cannot safely infer.
+`Knowledge.Registry` is authoritative. This module contains the temporary one-way projection
+needed by the existing CLI and trust audit while those consumers still operate on `Entry`.
 -/
 
 namespace Frontier.Knowledge
 
-private def generatedId (entryId suffix : String) : String := entryId ++ ":" ++ suffix
-
-def claimIdOf (entry : Frontier.Entry) : ClaimId := ⟨entry.id⟩
-
-def formalizationIdOf (entry : Frontier.Entry) : FormalizationId :=
-  ⟨generatedId entry.id "formalization:primary"⟩
-
-def certificateIdOf (entry : Frontier.Entry) : CertificateId :=
-  ⟨generatedId entry.id "certificate:legacy"⟩
-
-def citationIdOf (entry : Frontier.Entry) : CitationId :=
-  ⟨generatedId entry.id "citation:legacy"⟩
-
-def literatureAssertionIdOf (entry : Frontier.Entry) : LiteratureAssertionId :=
-  ⟨generatedId entry.id "literature:legacy"⟩
-
-def sanityCheckIdOf (entry : Frontier.Entry) (index : Nat) : SanityCheckId :=
-  ⟨generatedId entry.id s!"sanity:{index}"⟩
-
-private def claimKindOfStatus : Frontier.Status → ClaimKind
+private def toStatus : RepositoryStatus → Frontier.Status
+  | .formalizing => .formalizing
+  | .open => .open
   | .conditional => .conditional
-  | .independent => .independence
-  | .undecidable => .undecidability
-  | _ => .ordinary
+  | .proved => .proved
+  | .disproved => .disproved
+  | .independent => .independent
+  | .undecidable => .undecidable
 
-private def literatureConclusionOf : Frontier.Literature → LiteratureConclusion
+private def toLiterature : LiteratureConclusion → Frontier.Literature
   | .unresolved => .unresolved
-  | .proved => .affirmed
-  | .disproved => .refuted
+  | .affirmed => .proved
+  | .refuted => .disproved
   | .folklore => .folklore
 
-private def certificateConclusionOf (status : Frontier.Status) : CertificateConclusion :=
-  if status == .disproved then .refutes else .affirms
+private def toEvidence : CertificateMethod → Option Frontier.EvidenceKind
+  | .directProof => some .proof
+  | .counterexample => some .counterexample
+  | .conditionalProof => some .conditionalProof
+  | .modelConstruction => some .modelConstruction
+  | .reduction => some .reduction
+  | .metatheorem => some .metatheorem
+  | .legacyUnclassified => none
 
-private def certificateMethodOf : Option Frontier.EvidenceKind → CertificateMethod
-  | some .proof => .directProof
-  | some .counterexample => .counterexample
-  | some .conditionalProof => .conditionalProof
-  | some .modelConstruction => .modelConstruction
-  | some .reduction => .reduction
-  | some .metatheorem => .metatheorem
-  | none => .legacyUnclassified
+private def Registry.primaryFormalization? (registry : Registry)
+    (claimId : ClaimId) : Option Formalization :=
+  registry.formalizations.find? fun item => item.claimId == claimId && item.role == .primary
 
-/-- The records generated from one legacy entry before flattening into a `Registry`. -/
-structure NormalizedEntry where
-  claim : Claim
-  formalization : Formalization
-  certificate? : Option Certificate
-  sanityChecks : Array SanityCheck
-  citation? : Option Citation
-  literatureAssertion : LiteratureAssertion
-  legacy : LegacyMetadata
-  deriving BEq, Inhabited, Repr
+private def Registry.literatureAssertion? (registry : Registry)
+    (claimId : ClaimId) : Option LiteratureAssertion :=
+  registry.literatureAssertions.foldl (init := none) fun result assertion =>
+    if assertion.claimId == claimId then some assertion else result
 
-/-- Normalize one legacy entry without auditing or strengthening any authored assertion. -/
-def normalizeEntry (entry : Frontier.Entry) : NormalizedEntry :=
-  let claimId := claimIdOf entry
-  let formalizationId := formalizationIdOf entry
-  let citation? := entry.citation?.map fun display => {
-    id := citationIdOf entry
-    display := display
-  }
-  {
-    claim := {
-      id := claimId
-      title := entry.title
-      summary := entry.summary
-      kind := claimKindOfStatus entry.status
-      topic := entry.topic
-      tags := entry.tags
-      authors := entry.authors
-      created := entry.created
-      updated := entry.updated
-    }
-    formalization := {
-      id := formalizationId
-      claimId := claimId
-      statement := entry.statement
-      baseTheory? := entry.baseTheory?.map fun description => { description := description }
-      authors := entry.authors
-      tooling := entry.tooling
-    }
-    certificate? := entry.certificate?.map fun declaration => {
-      id := certificateIdOf entry
-      formalizationId := formalizationId
-      declaration := declaration
-      conclusion := certificateConclusionOf entry.status
-      method := certificateMethodOf entry.evidence?
-      authors := entry.authors
-      tooling := entry.tooling
-    }
-    sanityChecks := entry.sanityChecks.mapIdx fun index declaration => {
-      id := sanityCheckIdOf entry index
-      formalizationId := formalizationId
-      declaration := declaration
-      role := .legacyUnclassified
-    }
-    citation? := citation?
-    literatureAssertion := {
-      id := literatureAssertionIdOf entry
-      claimId := claimId
-      conclusion := literatureConclusionOf entry.literature
-      citations := citation?.map (#[·.id]) |>.getD #[]
-      observed := entry.updated
-    }
-    legacy := {
-      claimId := claimId
-      status := entry.status
-      literature := entry.literature
-      citation? := entry.citation?
-      evidence? := entry.evidence?
-      baseTheory? := entry.baseTheory?
-      source? := entry.source?
-    }
+private def Registry.citationDisplay? (registry : Registry)
+    (assertion : LiteratureAssertion) : Option String :=
+  assertion.citations.foldl (init := none) fun result citationId =>
+    result.orElse fun _ => (registry.citations.find? (·.id == citationId)).map (·.display)
+
+private def Registry.projectClaim? (registry : Registry) (claim : Claim) : Option Frontier.Entry := do
+  let formalization ← registry.primaryFormalization? claim.id
+  let assertion ← registry.literatureAssertion? claim.id
+  let certificate? := registry.certificates.find? (·.formalizationId == formalization.id)
+  let checks := registry.sanityChecks.filter (·.formalizationId == formalization.id)
+  return {
+    id := claim.id.value
+    title := claim.title
+    summary := claim.summary
+    status := toStatus formalization.status
+    literature := toLiterature assertion.conclusion
+    citation? := registry.citationDisplay? assertion
+    topic := claim.topic
+    tags := claim.tags
+    statement := formalization.statement
+    certificate? := certificate?.map (·.declaration)
+    evidence? := certificate?.bind (toEvidence ·.method)
+    baseTheory? := formalization.baseTheory?.map (·.description)
+    sanityChecks := checks.map (·.declaration)
+    authors := claim.authors
+    tooling := formalization.tooling
+    source? := claim.source?
+    created := claim.created
+    updated := claim.updated
   }
 
-/-- Flatten legacy entries in input order. Generated IDs depend only on the source entry ID. -/
-def ofLegacy (entries : Array Frontier.Entry) : Registry :=
-  entries.foldl (init := {}) fun registry entry =>
-    let normalized := normalizeEntry entry
-    { registry with
-      claims := registry.claims.push normalized.claim
-      formalizations := registry.formalizations.push normalized.formalization
-      certificates := normalized.certificate?.map registry.certificates.push
-        |>.getD registry.certificates
-      sanityChecks := registry.sanityChecks ++ normalized.sanityChecks
-      citations := normalized.citation?.map registry.citations.push |>.getD registry.citations
-      literatureAssertions :=
-        registry.literatureAssertions.push normalized.literatureAssertion
-      legacy := registry.legacy.push normalized.legacy }
-
-/-- Reconstruct the source shape for migration parity tests and compatibility exports. -/
-def NormalizedEntry.toLegacyEntry (entry : NormalizedEntry) : Frontier.Entry := {
-  id := entry.claim.id.value
-  title := entry.claim.title
-  summary := entry.claim.summary
-  status := entry.legacy.status
-  literature := entry.legacy.literature
-  citation? := entry.legacy.citation?
-  topic := entry.claim.topic
-  tags := entry.claim.tags
-  statement := entry.formalization.statement
-  certificate? := entry.certificate?.map (·.declaration)
-  evidence? := entry.legacy.evidence?
-  baseTheory? := entry.legacy.baseTheory?
-  sanityChecks := entry.sanityChecks.map (·.declaration)
-  authors := entry.claim.authors
-  tooling := entry.formalization.tooling
-  source? := entry.legacy.source?
-  created := entry.claim.created
-  updated := entry.claim.updated
-}
+/-- Project canonical records into the legacy shape consumed by the current audit and CLI. -/
+def Registry.toEntries (registry : Registry) : Array Frontier.Entry :=
+  registry.claims.filterMap registry.projectClaim?
 
 end Frontier.Knowledge

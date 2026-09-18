@@ -7,9 +7,11 @@ Authors: Jack Michaud
 import Lean
 
 /-!
-# Frontier theorem registry
+# Frontier audit projection
 
-Data types shared by the checked Lean catalog and the `frontier` CLI.
+Compatibility data types shared by the trust audit and the `frontier` CLI. The authoritative
+catalog is `Frontier.Knowledge.Registry`; `Entry` is projected from it at the executable
+boundary until these consumers operate on normalized records directly.
 
 Two independent axes describe every record:
 
@@ -97,7 +99,7 @@ def EvidenceKind.toString : EvidenceKind → String
   | .reduction => "reduction"
   | .metatheorem => "metatheorem"
 
-/-- A theorem, conjecture, disproof, or metamathematical classification tracked by Frontier. -/
+/-- Flattened compatibility view consumed by the current trust audit and CLI. -/
 structure Entry where
   id : String
   title : String

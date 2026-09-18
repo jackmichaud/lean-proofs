@@ -318,6 +318,52 @@ private def invalidGoal (context : Context) (request : API.Request) (message : S
 private def missingState (context : Context) (request : API.Request) (message : String) : Json :=
   requestFailure context request { code := .stateNotFound, message }
 
+private def researchFailure (context : Context) (request : API.Request) (message : String) : Json :=
+  requestFailure context request { code := .researchState, message }
+
+private def researchStateId (id : Nat) : Research.ProofStateId :=
+  ⟨s!"state-{id}"⟩
+
+private def loadAttemptEvents (context : Context) (request : API.Request)
+    (attemptId : Research.AttemptId) : IO (Except Json (Array Research.Event)) := do
+  match ← Research.readEvents context.workRoot attemptId with
+  | .error message => return .error (researchFailure context request message)
+  | .ok events =>
+      if events.isEmpty then
+        return .error (researchFailure context request s!"no research attempt '{attemptId.value}'")
+      return .ok events
+
+private def ownsState (events : Array Research.Event) (id : Research.ProofStateId) : Bool :=
+  events.any fun event =>
+    match event.payload with
+    | .attemptCreated value => value.initialStateId? == some id
+    | .actionEvaluated value => value.childStateId? == some id
+    | _ => false
+
+private def evaluationOutcome : ProofActionOutcome → Research.EvaluationOutcome
+  | .accepted | .complete => .accepted
+  | .rejected | .policyRejected | .failed => .rejected
+
+private def evaluationPayload (parentStateId : Research.ProofStateId)
+    (heartbeats : Nat) (action : API.BatchAction) (result : ProofActionResult) : Research.Payload :=
+  let childStateId? := match result.outcome, result.step? with
+    | .accepted, some step | .complete, some step => some (researchStateId step.id)
+    | _, _ => none
+  let diagnostics := match result.step? with
+    | some step => step.errors ++ step.policyErrors
+    | none => result.error?.toArray
+  .actionEvaluated {
+    transitionId := action.transitionId
+    parentStateId
+    childStateId?
+    action := action.tactic
+    outcome := evaluationOutcome result.outcome
+    goals := result.step?.map (·.goals) |>.getD #[]
+    diagnostics
+    complete := result.outcome == .complete
+    heartbeats? := some heartbeats
+  }
+
 def computeTyped (context : Context) (request : API.Request) : IO Json := do
   match API.validateRequest context request with
   | .error error => return requestFailure context request error
@@ -329,6 +375,44 @@ def computeTyped (context : Context) (request : API.Request) : IO Json := do
       | "environment.describe" =>
           if let .error error := API.emptyParams request then return requestFailure context request error
           return API.successResponse context request (API.environmentJson context)
+      | "research.attempt.create" =>
+          let attemptId ← match API.requireAttemptId request with
+            | .ok value => pure value
+            | .error error => return requestFailure context request error
+          let params ← match API.attemptCreateParams request with
+            | .ok value => pure value
+            | .error error => return requestFailure context request error
+          match ← Research.readEvents context.workRoot attemptId with
+          | .error message => return researchFailure context request message
+          | .ok events => unless events.isEmpty do
+              return researchFailure context request s!"research attempt '{attemptId.value}' already exists"
+          if let some parent := params.parentAttemptId? then
+            match ← loadAttemptEvents context request parent with
+            | .error response => return response
+            | .ok _ => pure ()
+          let initialStep? ← match params.proposition? with
+            | none => pure none
+            | some proposition =>
+                match ← runProofStep context (.proposition proposition) none defaultTacticHeartbeats with
+                | .error message => return invalidGoal context request message
+                | .ok step => pure (some step)
+          let payload : Research.Payload := .attemptCreated {
+            metadata := {
+              title := params.title
+              goal := params.goal
+              note? := params.note?
+            }
+            initialStateId? := initialStep?.map fun step => researchStateId step.id
+            parentAttemptId? := params.parentAttemptId?
+          }
+          match ← appendResearch context attemptId.value request.actor #[payload] with
+          | .error message => return researchFailure context request message
+          | .ok _ =>
+              return API.successResponse context request (Json.mkObj [
+                ("attemptId", toJson attemptId.value),
+                ("initialProofState", match initialStep? with
+                  | some step => proofStepJson step
+                  | none => .null)])
       | "declarations.search" =>
           match API.searchParams request with
           | .error error => return requestFailure context request error
@@ -339,54 +423,95 @@ def computeTyped (context : Context) (request : API.Request) : IO Json := do
                 ("query", toJson params.query), ("total", toJson total),
                 ("hits", Json.arr (hits.map searchHitJson))])
       | "premises.retrieve" =>
-          match API.premiseParams request with
-          | .error error => return requestFailure context request error
-          | .ok params =>
-              match ← elabProposition context.env params.goal with
-              | .error message => return invalidGoal context request message
-              | .ok goal =>
-                  let candidates ← rankPremises context goal {} params.limit
+          let attemptId ← match API.requireAttemptId request with
+            | .ok value => pure value
+            | .error error => return requestFailure context request error
+          let params ← match API.premiseParams request with
+            | .ok value => pure value
+            | .error error => return requestFailure context request error
+          match ← loadAttemptEvents context request attemptId with
+          | .error response => return response
+          | .ok _ => pure ()
+          match ← elabProposition context.env params.goal with
+          | .error message => return invalidGoal context request message
+          | .ok goal =>
+              let candidates ← rankPremises context goal {} params.limit
+              let payload : Research.Payload := .retrievalPerformed {
+                retrievalId := params.retrievalId
+                query := params.goal
+                results := candidates.map (·.name.toString)
+              }
+              match ← appendResearch context attemptId.value request.actor #[payload] with
+              | .error message => return researchFailure context request message
+              | .ok _ =>
                   return API.successResponse context request (Json.mkObj [
+                    ("attemptId", toJson attemptId.value),
+                    ("retrievalId", toJson params.retrievalId.value),
                     ("goal", toJson params.goal),
                     ("proposition", toJson (← prettyExpr context.env goal)),
                     ("candidates", Json.arr (candidates.map premiseJson))])
       | "proof.evaluateBatch" =>
-          match API.batchParams request with
-          | .error error => return requestFailure context request error
-          | .ok params =>
-              let origin? : Except String ProofOrigin ← match params.origin with
-                | .goal source =>
-                    match ← elabProposition context.env source params.heartbeats with
-                    | .error message => pure (.error message)
-                    | .ok _ => pure (.ok (ProofOrigin.proposition source))
-                | .parentState id =>
-                    match ← context.proofState? id with
-                    | .error message => pure (.error message)
-                    | .ok state => pure (.ok (ProofOrigin.resume state))
-              match origin? with
-              | .error message =>
-                  match params.origin with
-                  | .goal _ => return invalidGoal context request message
-                  | .parentState _ => return missingState context request message
-              | .ok origin =>
-                  let actions := params.actions.map fun action =>
-                    ({ id := action.id, tactic := action.tactic } : ProofAction)
-                  let batch ← runProofBatch context origin actions params.heartbeats
-                  return API.successResponse context request (Json.mkObj [
-                    ("results", Json.arr (batch.results.map actionResultJson))])
+          let attemptId ← match API.requireAttemptId request with
+            | .ok value => pure value
+            | .error error => return requestFailure context request error
+          let params ← match API.batchParams request with
+            | .ok value => pure value
+            | .error error => return requestFailure context request error
+          let events ← match ← loadAttemptEvents context request attemptId with
+            | .ok value => pure value
+            | .error response => return response
+          let parentStateId := researchStateId params.parentStateId
+          unless ownsState events parentStateId do
+            return researchFailure context request
+              s!"proof state {params.parentStateId} does not belong to attempt '{attemptId.value}'"
+          let state ← match ← context.proofState? params.parentStateId with
+            | .ok value => pure value
+            | .error message => return missingState context request message
+          let actions := params.actions.map fun action =>
+            ({ id := action.id, tactic := action.tactic } : ProofAction)
+          let batch ← runProofBatch context (.resume state) actions params.heartbeats
+          let mut payloads := #[]
+          for (action, result) in params.actions.zip batch.results do
+            payloads := payloads.push (.actionProposed {
+              stateId := parentStateId
+              action := action.tactic
+              retrievalIds := action.retrievalIds
+            })
+            payloads := payloads.push (evaluationPayload parentStateId params.heartbeats action result)
+            if result.outcome == .policyRejected then
+              payloads := payloads.push (.policyRejected {
+                artifact := s!"proof action {action.id}"
+                violations := result.step?.map (·.policyErrors) |>.getD #["policy rejected"]
+              })
+          match ← appendResearch context attemptId.value request.actor payloads with
+          | .error message => return researchFailure context request message
+          | .ok _ =>
+              return API.successResponse context request (Json.mkObj [
+                ("attemptId", toJson attemptId.value),
+                ("parentStateId", toJson params.parentStateId),
+                ("results", Json.arr (batch.results.map actionResultJson))])
       | "proof.inspectState" =>
-          match API.inspectParams request with
-          | .error error => return requestFailure context request error
-          | .ok params =>
-              match ← context.proofState? params.stateId with
-              | .error message => return missingState context request message
-              | .ok state =>
-                  match ← runProofStep context (.resume state) none params.heartbeats with
-                  | .error message => return invalidGoal context request message
-                  | .ok step =>
-                      return API.successResponse context request (Json.mergeObj
-                        (Json.mkObj [("requestedStateId", toJson params.stateId)])
-                        (proofStepJson step))
+          let attemptId ← match API.requireAttemptId request with
+            | .ok value => pure value
+            | .error error => return requestFailure context request error
+          let params ← match API.inspectParams request with
+            | .ok value => pure value
+            | .error error => return requestFailure context request error
+          let events ← match ← loadAttemptEvents context request attemptId with
+            | .ok value => pure value
+            | .error response => return response
+          unless ownsState events (researchStateId params.stateId) do
+            return researchFailure context request
+              s!"proof state {params.stateId} does not belong to attempt '{attemptId.value}'"
+          match ← context.proofState? params.stateId with
+          | .error message => return missingState context request message
+          | .ok state =>
+              match ← runProofStep context (.resume state) none params.heartbeats with
+              | .error message => return invalidGoal context request message
+              | .ok step =>
+                  return API.successResponse context request (Json.mergeObj
+                    (Json.mkObj [("requestedStateId", toJson params.stateId)])
+                    (proofStepJson { step with id := params.stateId }))
       | operation =>
           return requestFailure context request {
             code := .unsupportedOperation

@@ -28,6 +28,7 @@ inductive ErrorCode where
   | environmentMismatch
   | invalidGoal
   | stateNotFound
+  | researchState
   | internalError
   deriving BEq, DecidableEq, Inhabited, Repr
 
@@ -39,6 +40,7 @@ def ErrorCode.toString : ErrorCode → String
   | .environmentMismatch => "ENVIRONMENT_MISMATCH"
   | .invalidGoal => "INVALID_GOAL"
   | .stateNotFound => "STATE_NOT_FOUND"
+  | .researchState => "RESEARCH_STATE_ERROR"
   | .internalError => "INTERNAL_ERROR"
 
 structure Error where
@@ -46,16 +48,24 @@ structure Error where
   message : String
   deriving Inhabited, Repr
 
-/-- One structured request. `params` and `provenance` are retained as JSON objects so the
-envelope can evolve without turning transport concerns into Lean command-line types. -/
+/-- One structured request. Research operations name their attempt in the envelope; all
+requests carry typed actor provenance, even when an operation does not append an event. -/
 structure Request where
   apiVersion : String
   requestId : String
   operation : String
   environment? : Option String
+  attemptId? : Option Research.AttemptId
   params : Json
-  provenance : Json
+  actor : Research.Actor
   deriving Inhabited
+
+structure AttemptCreateParams where
+  title : String
+  goal : String
+  proposition? : Option String := none
+  note? : Option String := none
+  parentAttemptId? : Option Research.AttemptId := none
 
 structure SearchParams where
   query : String
@@ -64,18 +74,17 @@ structure SearchParams where
 
 structure PremiseParams where
   goal : String
+  retrievalId : Research.RetrievalId
   limit : Nat := CLI.defaultSuggestLimit
 
 structure BatchAction where
   id : String
   tactic : String
-
-inductive BatchOrigin where
-  | goal (source : String)
-  | parentState (id : Nat)
+  transitionId : Research.TransitionId
+  retrievalIds : Array Research.RetrievalId := #[]
 
 structure BatchParams where
-  origin : BatchOrigin
+  parentStateId : Nat
   actions : Array BatchAction
   heartbeats : Nat := CLI.defaultTacticHeartbeats
 
@@ -130,6 +139,28 @@ private def requiredObject (json : Json) (key : String) : Except Error Json := d
     { code := .invalidRequest, message := s!"field '{key}' must be an object" }
   return value
 
+private def actorKind (value : String) : Except Error Research.ActorKind :=
+  match value with
+  | "human" => .ok .human
+  | "agent" => .ok .agent
+  | "tool" => .ok .tool
+  | "system" => .ok .system
+  | _ => fail .invalidRequest
+      "provenance field 'kind' must be human, agent, tool, or system"
+
+private def actorOfJson (json : Json) : Except Error Research.Actor := do
+  exactObject json ["kind", "name", "runId"] ["model", "configuration"] .invalidRequest
+  let runIdText ← requiredString json "runId"
+  let runId ← Research.RunId.parse runIdText |>.mapError fun message =>
+    { code := .invalidRequest, message }
+  return {
+    kind := ← actorKind (← requiredString json "kind")
+    name := ← requiredString json "name"
+    runId
+    model? := ← optionalString json "model"
+    configuration? := ← optionalString json "configuration"
+  }
+
 private def paramField (json : Json) (key : String) : Except Error Json :=
   json.getObjVal? key |>.mapError fun _ =>
     { code := .invalidParams, message := s!"missing required field '{key}'" }
@@ -159,14 +190,19 @@ private def optionalBool (json : Json) (key : String) (fallback : Bool) : Except
 /-- Decode the exact typed request envelope. Arrays and unknown envelope fields are rejected. -/
 def requestOfJson (json : Json) : Except Error Request := do
   exactObject json ["apiVersion", "requestId", "operation", "params", "provenance"]
-    ["environment"] .invalidRequest
+    ["environment", "attemptId"] .invalidRequest
+  let attemptId? ← match ← optionalString json "attemptId" with
+    | none => pure none
+    | some value => some <$> (Research.AttemptId.parse value |>.mapError fun message =>
+        { code := .invalidRequest, message })
   return {
     apiVersion := ← requiredString json "apiVersion"
     requestId := ← requiredString json "requestId"
     operation := ← requiredString json "operation"
     environment? := ← optionalString json "environment"
+    attemptId?
     params := ← requiredObject json "params"
-    provenance := ← requiredObject json "provenance"
+    actor := ← actorOfJson (← requiredObject json "provenance")
   }
 
 def parseRequest (source : String) : Except Error Request := do
@@ -226,8 +262,43 @@ def capabilitiesJson : Json :=
   Json.mkObj [
     ("apiVersions", toJson #[version]),
     ("operations", toJson #["capabilities.get", "environment.describe",
-      "declarations.search", "premises.retrieve", "proof.evaluateBatch",
+      "research.attempt.create", "declarations.search", "premises.retrieve", "proof.evaluateBatch",
       "proof.inspectState"]),
+    ("envelope", Json.mkObj [
+      ("required", toJson #["apiVersion", "requestId", "operation", "params", "provenance"]),
+      ("optional", toJson #["environment", "attemptId"]),
+      ("provenanceRequired", toJson #["kind", "name", "runId"]),
+      ("provenanceOptional", toJson #["model", "configuration"])]),
+    ("contracts", Json.arr #[
+      Json.mkObj [("operation", toJson "capabilities.get"), ("attempt", toJson "none"),
+        ("effect", toJson "read"), ("requiredParams", toJson (#[] : Array String)),
+        ("optionalParams", toJson (#[] : Array String))],
+      Json.mkObj [("operation", toJson "environment.describe"), ("attempt", toJson "none"),
+        ("effect", toJson "read"), ("requiredParams", toJson (#[] : Array String)),
+        ("optionalParams", toJson (#[] : Array String))],
+      Json.mkObj [("operation", toJson "research.attempt.create"),
+        ("attempt", toJson "required-new"), ("effect", toJson "append"),
+        ("requiredParams", toJson #["title", "goal"]),
+        ("optionalParams", toJson #["proposition", "note", "parentAttemptId"])],
+      Json.mkObj [("operation", toJson "declarations.search"), ("attempt", toJson "none"),
+        ("effect", toJson "read"), ("requiredParams", toJson #["query"]),
+        ("optionalParams", toJson #["limit", "includeDefinitions"])],
+      Json.mkObj [("operation", toJson "premises.retrieve"), ("attempt", toJson "required"),
+        ("effect", toJson "append"), ("requiredParams", toJson #["goal", "retrievalId"]),
+        ("optionalParams", toJson #["limit"])],
+      Json.mkObj [("operation", toJson "proof.evaluateBatch"), ("attempt", toJson "required"),
+        ("effect", toJson "append"),
+        ("requiredParams", toJson #["parentStateId", "actions"]),
+        ("optionalParams", toJson #["heartbeats"]),
+        ("actionRequired", toJson #["id", "tactic", "transitionId"]),
+        ("actionOptional", toJson #["retrievalIds"])],
+      Json.mkObj [("operation", toJson "proof.inspectState"), ("attempt", toJson "required"),
+        ("effect", toJson "read"), ("requiredParams", toJson #["stateId"]),
+        ("optionalParams", toJson #["heartbeats"])]
+    ]),
+    ("researchHistory", Json.mkObj [
+      ("schemaVersion", toJson (2 : Nat)), ("trusted", toJson false),
+      ("appendOnly", toJson true)]),
     ("transport", toJson "local-ndjson"),
     ("authority", toJson "local-process"),
     ("remoteAuthority", toJson false)
@@ -258,6 +329,43 @@ def validateRequest (context : CLI.Context) (request : Request) : Except Error U
 def emptyParams (request : Request) : Except Error Unit :=
   exactObject request.params [] []
 
+def requireAttemptId (request : Request) : Except Error Research.AttemptId :=
+  match request.attemptId? with
+  | some value =>
+      if Journal.isValidId value.value then .ok value
+      else fail .invalidParams
+        "field 'attemptId' must contain lowercase ASCII letters, digits, and hyphens"
+  | none => fail .invalidParams s!"operation '{request.operation}' requires envelope field 'attemptId'"
+
+private def optionalParamString (json : Json) (key : String) : Except Error (Option String) :=
+  match json.getObjVal? key with
+  | .error _ => .ok none
+  | .ok .null => .ok none
+  | .ok value =>
+      match value.getStr? with
+      | .error _ => fail .invalidParams s!"field '{key}' must be a string or null"
+      | .ok text =>
+          if text.trimAscii.isEmpty then fail .invalidParams s!"field '{key}' must not be blank"
+          else .ok (some text)
+
+def attemptCreateParams (request : Request) : Except Error AttemptCreateParams := do
+  exactObject request.params ["title", "goal"] ["proposition", "note", "parentAttemptId"]
+  let title ← paramString request.params "title"
+  let goal ← paramString request.params "goal"
+  if title.trimAscii.isEmpty then fail .invalidParams "field 'title' must not be blank"
+  if goal.trimAscii.isEmpty then fail .invalidParams "field 'goal' must not be blank"
+  let parentAttemptId? ← match ← optionalParamString request.params "parentAttemptId" with
+    | none => pure none
+    | some value => some <$> (Research.AttemptId.parse value |>.mapError fun message =>
+        { code := .invalidParams, message })
+  return {
+    title := title.trimAscii.toString
+    goal := goal.trimAscii.toString
+    proposition? := ← optionalParamString request.params "proposition"
+    note? := ← optionalParamString request.params "note"
+    parentAttemptId?
+  }
+
 def searchParams (request : Request) : Except Error SearchParams := do
   exactObject request.params ["query"] ["limit", "includeDefinitions"]
   let query ← paramString request.params "query"
@@ -271,38 +379,39 @@ def searchParams (request : Request) : Except Error SearchParams := do
   }
 
 def premiseParams (request : Request) : Except Error PremiseParams := do
-  exactObject request.params ["goal"] ["limit"]
+  exactObject request.params ["goal", "retrievalId"] ["limit"]
   let goal ← paramString request.params "goal"
   if goal.trimAscii.isEmpty then fail .invalidParams "field 'goal' must not be blank"
   let limit ← optionalNat request.params "limit" CLI.defaultSuggestLimit
   if limit == 0 then fail .invalidParams "field 'limit' must be positive"
-  return { goal, limit }
+  let retrievalIdText ← paramString request.params "retrievalId"
+  let retrievalId ← Research.RetrievalId.parse retrievalIdText |>.mapError fun message =>
+    { code := .invalidParams, message }
+  return { goal, retrievalId, limit }
 
 private def batchAction (json : Json) : Except Error BatchAction := do
-  exactObject json ["id", "tactic"] []
+  exactObject json ["id", "tactic", "transitionId"] ["retrievalIds"]
   let id ← paramString json "id"
   let tactic ← paramString json "tactic"
   if tactic.trimAscii.isEmpty then fail .invalidParams "field 'tactic' must not be blank"
-  return { id, tactic }
+  let transitionIdText ← paramString json "transitionId"
+  let transitionId ← Research.TransitionId.parse transitionIdText |>.mapError fun message =>
+    { code := .invalidParams, message }
+  let retrievalIds ← match json.getObjVal? "retrievalIds" with
+    | .error _ => pure #[]
+    | .ok value =>
+        let values ← value.getArr? |>.mapError fun _ =>
+          { code := .invalidParams, message := "field 'retrievalIds' must be an array" }
+        values.mapM fun value => do
+          let text ← value.getStr? |>.mapError fun _ =>
+            { code := .invalidParams, message := "retrieval ids must be strings" }
+          Research.RetrievalId.parse text |>.mapError fun message =>
+            { code := .invalidParams, message }
+  return { id, tactic, transitionId, retrievalIds }
 
 def batchParams (request : Request) : Except Error BatchParams := do
-  exactObject request.params ["actions"] ["goal", "parentStateId", "heartbeats"]
-  let goal? ← match request.params.getObjVal? "goal" with
-    | .error _ => pure none
-    | .ok value => some <$> (value.getStr? |>.mapError fun _ =>
-        { code := .invalidParams, message := "field 'goal' must be a string" })
-  let state? ← match request.params.getObjVal? "parentStateId" with
-    | .error _ => pure none
-    | .ok value => some <$> (value.getNat? |>.mapError fun _ =>
-        { code := .invalidParams,
-          message := "field 'parentStateId' must be a non-negative integer" })
-  let origin ← match goal?, state? with
-    | some goal, none =>
-        if goal.trimAscii.isEmpty then fail .invalidParams "field 'goal' must not be blank"
-        else pure (.goal goal)
-    | none, some id => pure (.parentState id)
-    | none, none => fail .invalidParams "exactly one of 'goal' or 'parentStateId' is required"
-    | some _, some _ => fail .invalidParams "'goal' and 'parentStateId' are mutually exclusive"
+  exactObject request.params ["parentStateId", "actions"] ["heartbeats"]
+  let parentStateId ← paramNat request.params "parentStateId"
   let values ← (← paramField request.params "actions").getArr? |>.mapError fun _ =>
     { code := .invalidParams, message := "field 'actions' must be an array" }
   if values.isEmpty then fail .invalidParams "field 'actions' must not be empty"
@@ -310,9 +419,12 @@ def batchParams (request : Request) : Except Error BatchParams := do
   let ids := actions.map (·.id)
   unless ids.toList.Pairwise (· != ·) do
     fail .invalidParams "action ids must be unique within a batch"
+  let transitionIds := actions.map (·.transitionId)
+  unless transitionIds.toList.Pairwise (· != ·) do
+    fail .invalidParams "transition ids must be unique within a batch"
   let heartbeats ← optionalNat request.params "heartbeats" CLI.defaultTacticHeartbeats
   if heartbeats == 0 then fail .invalidParams "field 'heartbeats' must be positive in a session"
-  return { origin, actions, heartbeats }
+  return { parentStateId, actions, heartbeats }
 
 def inspectParams (request : Request) : Except Error InspectParams := do
   exactObject request.params ["stateId"] ["heartbeats"]

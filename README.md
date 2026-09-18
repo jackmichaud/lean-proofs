@@ -125,7 +125,7 @@ command pays it. `frontier serve` imports once and then answers requests on stdi
 per line, one JSON response per line:
 
 ```bash
-printf '%s\n' '{"apiVersion":"frontier.agent/v1","requestId":"req-1","operation":"declarations.search","params":{"query":"pow_card","limit":3,"includeDefinitions":false},"provenance":{"actor":"example-agent"}}' | lake exe frontier serve
+printf '%s\n' '{"apiVersion":"frontier.agent/v1","requestId":"req-1","operation":"declarations.search","params":{"query":"pow_card","limit":3,"includeDefinitions":false},"provenance":{"kind":"agent","name":"example-agent","runId":"run-1","model":"model-name"}}' | lake exe frontier serve
 ```
 
 Each line is a versioned request envelope with an operation-specific `params` object, caller
@@ -134,6 +134,12 @@ loaded environment identifier; clients may send it back as `environment` to reje
 execution against a different snapshot. Start with `capabilities.get` to discover the supported
 operations. Legacy argument arrays and bare commands are intentionally rejected. EOF ends the
 session.
+
+Research operations are attempt-scoped. `research.attempt.create` creates the append-only stream
+and may open an initial Lean proposition; `premises.retrieve` records its ranked candidates, and
+`proof.evaluateBatch` records every proposed tactic and verifier outcome against a state owned by
+that attempt. This makes branching and failed approaches durable research data without treating
+them as mathematical evidence.
 
 The premise corpus is prepared once per session — every imported theorem reduced to sorted
 constant arrays and an IDF mass — on the first `suggest`. That call pays for the whole corpus;

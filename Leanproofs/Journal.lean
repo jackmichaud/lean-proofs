@@ -201,10 +201,12 @@ def freshId (root : System.FilePath) (title : String) : IO String := do
   while ← exists? root s!"{base}-{suffix}" do suffix := suffix + 1
   return s!"{base}-{suffix}"
 
-/-- Append one validated event and return the newly materialized work item. -/
-def append (root : System.FilePath) (id : String)
+/-- Append a nonempty batch as one validated write and return its materialized work item.
+The caller must serialize concurrent writers to the same stream. -/
+def appendMany (root : System.FilePath) (id : String)
     (environment : Research.EnvironmentFingerprint) (actor : Research.Actor)
-    (payload : Research.Payload) : IO (Except String Item) := do
+    (payloads : Array Research.Payload) : IO (Except String Item) := do
+  if payloads.isEmpty then return .error "cannot append an empty research event batch"
   let attempt ← match attemptId id with
     | .ok value => pure value
     | .error message => return .error message
@@ -212,19 +214,39 @@ def append (root : System.FilePath) (id : String)
     | .ok values => pure values
     | .error message => return .error message
   let occurredAt ← timestampNow
-  let sequence := events.size + 1
-  let event : Research.Event := {
-    eventId := ⟨s!"event-{sequence}"⟩
-    attemptId := attempt
-    sequence
-    occurredAt
-    environment
-    actor
-    payload
-  }
-  match ← Research.appendEvent root attempt event with
+  let appended := payloads.mapIdx fun index payload =>
+    let sequence := events.size + index + 1
+    {
+      eventId := ⟨s!"event-{sequence}"⟩
+      attemptId := attempt
+      sequence
+      occurredAt
+      environment
+      actor
+      payload
+    }
+  let combined := events ++ appended
+  match Research.validateStream attempt combined with
   | .error message => return .error message
-  | .ok _ => read? root id
+  | .ok _ => pure ()
+  let summary ← match Research.materialize attempt combined with
+    | .ok value => pure value
+    | .error message => return .error message
+  let path ← match Research.streamPath root attempt with
+    | .ok value => pure value
+    | .error message => return .error message
+  IO.FS.createDirAll root
+  let lines := "\n".intercalate (appended.map (Research.eventJson · |>.compress)).toList ++ "\n"
+  let handle ← IO.FS.Handle.mk path .append
+  handle.putStr lines
+  handle.flush
+  return .ok (itemOfSummary summary)
+
+/-- Append one validated event and return the newly materialized work item. -/
+def append (root : System.FilePath) (id : String)
+    (environment : Research.EnvironmentFingerprint) (actor : Research.Actor)
+    (payload : Research.Payload) : IO (Except String Item) :=
+  appendMany root id environment actor #[payload]
 
 def journalJson (items : Array Item) (problems : Array String) (generated : String) : Json :=
   let count (predicate : Item → Bool) : Nat :=

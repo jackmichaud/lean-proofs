@@ -33,13 +33,21 @@ private def publishWork (context : Context) : IO Unit := do
   if let some path := context.workPublish? then
     _ ← Journal.publish context.workRoot path
 
-private def appendWork (context : Context) (id : String) (payload : Research.Payload) :
-    IO (Except Payload Journal.Item) := do
-  match ← Journal.append context.workRoot id (workEnvironment context) workActor payload with
-  | .error message => return .error (.failure message)
+/-- Append one research event batch under the active Frontier environment, then refresh the
+materialized web view. The batch is all-or-nothing with respect to validation. -/
+def appendResearch (context : Context) (id : String) (actor : Research.Actor)
+    (payloads : Array Research.Payload) : IO (Except String Journal.Item) := do
+  match ← Journal.appendMany context.workRoot id (workEnvironment context) actor payloads with
+  | .error message => return .error message
   | .ok item =>
       publishWork context
       return .ok item
+
+private def appendWork (context : Context) (id : String) (payload : Research.Payload) :
+    IO (Except Payload Journal.Item) := do
+  match ← appendResearch context id workActor #[payload] with
+  | .error message => return .error (.failure message)
+  | .ok item => return .ok item
 
 def loadItem (context : Context) (id : String) : IO (Except Payload Journal.Item) := do
   if !Journal.isValidId id then

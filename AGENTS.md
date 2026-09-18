@@ -44,15 +44,16 @@ Importing mathlib with the delaborators loaded costs about twenty seconds, and e
 command pays it in full. If you are making more than a couple of calls, open a session:
 
 ```bash
-printf '%s\n' '{"apiVersion":"frontier.agent/v1","requestId":"req-1","operation":"premises.retrieve","params":{"goal":"∀ n : ℕ, n + 0 = n","limit":10},"provenance":{"actor":"research-agent"}}' \
+printf '%s\n' '{"apiVersion":"frontier.agent/v1","requestId":"req-1","operation":"research.attempt.create","attemptId":"add-zero","params":{"title":"Prove add_zero","goal":"Formalize the additive identity","proposition":"∀ n : ℕ, n + 0 = n"},"provenance":{"kind":"agent","name":"research-agent","runId":"run-1","model":"model-name"}}' \
   | lake exe frontier serve
 ```
 
 One versioned JSON request envelope per line in, one correlated JSON response per line out.
 Begin with `capabilities.get`; supported operations include declaration search, premise
 retrieval, independent batch tactic evaluation, and proof-state inspection. Pin later requests
-to the environment id returned by the session. Legacy argument arrays and bare commands are not
-accepted. `--json` works on any one-shot command too.
+to the environment id returned by the session. Premise retrieval and proof operations require
+the attempt id and record their inputs and outcomes in that attempt's event stream. Legacy
+argument arrays and bare commands are not accepted. `--json` works on any one-shot command too.
 
 ## Things that will trip you up
 

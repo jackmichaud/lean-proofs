@@ -24,13 +24,20 @@ private def errorCode? (json : Json) : Option String := do
 private def result? (json : Json) : Option Json :=
   json.getObjVal? "result" |>.toOption
 
-private def mkRequest (operation : String) (params : Json) (requestId := "req-1") : API.Request := {
+private def mkRequest (operation : String) (params : Json) (requestId := "req-1")
+    (attemptId? : Option String := none) : API.Request := {
   apiVersion := API.version
   requestId
   operation
   environment? := none
+  attemptId? := attemptId?.map (⟨·⟩)
   params
-  provenance := Json.mkObj [("actor", toJson "test")]
+  actor := {
+    kind := .agent
+    name := "test-agent"
+    runId := ⟨"api-test-run"⟩
+    model? := some "test-model"
+  }
 }
 
 private def actionResult? (response : Json) (id : String) : Option Json := do
@@ -40,9 +47,16 @@ private def actionResult? (response : Json) (id : String) : Option Json := do
 
 def testAPI (suite : Suite) (context : Context) : IO Unit := do
   let context := { context with session := true }
+  let attemptId := "api-test-attempt"
+  let attemptPath := context.workRoot / s!"{attemptId}.jsonl"
+  let otherAttemptId := "api-other-attempt"
+  let otherAttemptPath := context.workRoot / s!"{otherAttemptId}.jsonl"
+  if ← attemptPath.pathExists then IO.FS.removeFile attemptPath
+  if ← otherAttemptPath.pathExists then IO.FS.removeFile otherAttemptPath
   let source :=
     "{\"apiVersion\":\"frontier.agent/v1\",\"requestId\":\"req-1\"," ++
-    "\"operation\":\"capabilities.get\",\"params\":{},\"provenance\":{\"actor\":\"test\"}}"
+    "\"operation\":\"capabilities.get\",\"params\":{}," ++
+    "\"provenance\":{\"kind\":\"agent\",\"name\":\"test-agent\",\"runId\":\"api-test-run\"}}"
   let parsed := API.parseRequest source
   check suite "a typed request envelope parses"
     (parsed.toOption.map (·.requestId) == some "req-1")
@@ -53,7 +67,7 @@ def testAPI (suite : Suite) (context : Context) : IO Unit := do
       == (some "req-1", some "capabilities.get"))
   check suite "typed provenance is required"
     ((API.parseRequest
-      (source.replace ",\"provenance\":{\"actor\":\"test\"}" "")).toOption.isNone)
+      (source.replace ",\"provenance\":{\"kind\":\"agent\",\"name\":\"test-agent\",\"runId\":\"api-test-run\"}" "")).toOption.isNone)
 
   let arrayResponse ← handleRequest context "[\"policy\"]"
   check suite "serve rejects legacy array requests"
@@ -70,6 +84,9 @@ def testAPI (suite : Suite) (context : Context) : IO Unit := do
     (fieldString? capabilities "environment" == some (API.environmentId context))
   check suite "capabilities succeed"
     ((capabilities.getObjValAs? Bool "ok").toOption == some true)
+  check suite "capabilities describe operation contracts"
+    ((result? capabilities >>= fun result =>
+      (result.getObjVal? "contracts" >>= Json.getArr?).toOption).any (·.size == 7))
 
   let unsupported := { request with operation := "cli.execute" }
   let unsupportedResponse ← computeTyped context unsupported
@@ -101,22 +118,48 @@ def testAPI (suite : Suite) (context : Context) : IO Unit := do
   check suite "declaration search is a native typed operation"
     ((search.getObjValAs? Bool "ok").toOption == some true)
 
+  let created ← computeTyped context (mkRequest "research.attempt.create" (Json.mkObj [
+    ("title", toJson "API proof attempt"),
+    ("goal", toJson "Prove the additive identity"),
+    ("proposition", toJson "∀ n : ℕ, n + 0 = n")]) "create-1" (some attemptId))
+  check suite "agents can create a durable proof attempt"
+    ((created.getObjValAs? Bool "ok").toOption == some true)
+  let some createdResult := result? created
+    | check suite "attempt creation returns a result" false
+  let some initialProof := createdResult.getObjVal? "initialProofState" |>.toOption
+    | check suite "attempt creation returns an initial proof state" false
+  let some initialStateId := (initialProof.getObjVal? "stateId" >>= Json.getNat?).toOption
+    | check suite "initial proof state has a numeric id" false
+
   let premises ← computeTyped context (mkRequest "premises.retrieve"
-    (Json.mkObj [("goal", toJson "∀ n : ℕ, n + 0 = n"), ("limit", toJson (3 : Nat))]))
+    (Json.mkObj [("goal", toJson "∀ n : ℕ, n + 0 = n"),
+      ("retrievalId", toJson "retrieval-1"), ("limit", toJson (3 : Nat))])
+    "premises-1" (some attemptId))
   check suite "premise retrieval accepts a Lean goal"
     ((premises.getObjValAs? Bool "ok").toOption == some true)
   let badGoal ← computeTyped context (mkRequest "premises.retrieve"
-    (Json.mkObj [("goal", toJson "not valid Lean !!!")]))
+    (Json.mkObj [("goal", toJson "not valid Lean !!!"),
+      ("retrievalId", toJson "retrieval-bad")]) "premises-bad" (some attemptId))
   check suite "invalid Lean goals have a stable error code"
     (errorCode? badGoal == some "INVALID_GOAL")
 
+  let detachedPremises ← computeTyped context (mkRequest "premises.retrieve"
+    (Json.mkObj [("goal", toJson "True"), ("retrievalId", toJson "detached")]))
+  check suite "research operations require an attempt id"
+    (errorCode? detachedPremises == some "INVALID_PARAMS")
+
   let batchParams := Json.mkObj [
-    ("goal", toJson "∀ n : ℕ, n + 0 = n"),
+    ("parentStateId", toJson initialStateId),
     ("actions", Json.arr #[
-      Json.mkObj [("id", toJson "advance"), ("tactic", toJson "intro n")],
-      Json.mkObj [("id", toJson "reject"), ("tactic", toJson "exact nonsense_lemma")],
-      Json.mkObj [("id", toJson "finish"), ("tactic", toJson "simp")]])]
-  let batch ← computeTyped context (mkRequest "proof.evaluateBatch" batchParams "batch-1")
+      Json.mkObj [("id", toJson "advance"), ("tactic", toJson "intro n"),
+        ("transitionId", toJson "transition-advance"),
+        ("retrievalIds", toJson #["retrieval-1"])],
+      Json.mkObj [("id", toJson "reject"), ("tactic", toJson "exact nonsense_lemma"),
+        ("transitionId", toJson "transition-reject")],
+      Json.mkObj [("id", toJson "finish"), ("tactic", toJson "simp"),
+        ("transitionId", toJson "transition-finish")]])]
+  let batch ← computeTyped context
+    (mkRequest "proof.evaluateBatch" batchParams "batch-1" (some attemptId))
   check suite "batch responses preserve request correlation"
     (fieldString? batch "requestId" == some "batch-1")
   check suite "an accepted batch sibling advances independently"
@@ -129,16 +172,47 @@ def testAPI (suite : Suite) (context : Context) : IO Unit := do
     ((actionResult? batch "finish" >>= fun value => fieldString? value "outcome")
       == some "complete")
 
+  let beforeInvalid ← Research.readEvents context.workRoot ⟨attemptId⟩
+  let invalidHistory ← computeTyped context (mkRequest "proof.evaluateBatch" (Json.mkObj [
+    ("parentStateId", toJson initialStateId),
+    ("actions", Json.arr #[Json.mkObj [
+      ("id", toJson "bad-reference"), ("tactic", toJson "simp"),
+      ("transitionId", toJson "transition-bad-reference"),
+      ("retrievalIds", toJson #["missing-retrieval"]) ]])])
+    "batch-invalid-history" (some attemptId))
+  check suite "invalid research references reject the whole batch"
+    (errorCode? invalidHistory == some "RESEARCH_STATE_ERROR")
+  let afterInvalid ← Research.readEvents context.workRoot ⟨attemptId⟩
+  check suite "a rejected event batch leaves no partial history"
+    (beforeInvalid.toOption.map (·.size) == afterInvalid.toOption.map (·.size))
+
   let zeroHeartbeats ← computeTyped context (mkRequest "proof.evaluateBatch"
-    (Json.mergeObj batchParams (Json.mkObj [("heartbeats", toJson (0 : Nat))])))
+    (Json.mergeObj batchParams (Json.mkObj [("heartbeats", toJson (0 : Nat))]))
+    "batch-zero" (some attemptId))
   check suite "sessions reject unbounded tactic evaluation"
     (errorCode? zeroHeartbeats == some "INVALID_PARAMS")
 
+  let otherCreated ← computeTyped context (mkRequest "research.attempt.create" (Json.mkObj [
+    ("title", toJson "Arithmetic policy attempt"),
+    ("goal", toJson "Check the policy boundary"),
+    ("proposition", toJson "(2 : ℕ) + 2 = 4")])
+    "create-other" (some otherAttemptId))
+  check suite "a second proof attempt can be recorded"
+    ((otherCreated.getObjValAs? Bool "ok").toOption == some true)
+  let some otherResult := result? otherCreated
+    | check suite "second attempt creation returns a result" false
+  let some otherProof := otherResult.getObjVal? "initialProofState" |>.toOption
+    | check suite "second attempt returns an initial proof state" false
+  let some arithmeticStateId := (otherProof.getObjVal? "stateId" >>= Json.getNat?).toOption
+    | check suite "second initial proof state has a numeric id" false
   let policyBatch ← computeTyped context (mkRequest "proof.evaluateBatch" (Json.mkObj [
-    ("goal", toJson "(2 : ℕ) + 2 = 4"),
+    ("parentStateId", toJson arithmeticStateId),
     ("actions", Json.arr #[
-      Json.mkObj [("id", toJson "forbidden"), ("tactic", toJson "native_decide")],
-      Json.mkObj [("id", toJson "trusted"), ("tactic", toJson "decide")]])]))
+      Json.mkObj [("id", toJson "forbidden"), ("tactic", toJson "native_decide"),
+        ("transitionId", toJson "transition-forbidden")],
+      Json.mkObj [("id", toJson "trusted"), ("tactic", toJson "simp"),
+        ("transitionId", toJson "transition-trusted")]])])
+    "batch-2" (some otherAttemptId))
   check suite "policy-invalid proofs are rejected explicitly"
     ((actionResult? policyBatch "forbidden" >>= fun value => fieldString? value "outcome")
       == some "policyRejected")
@@ -151,8 +225,29 @@ def testAPI (suite : Suite) (context : Context) : IO Unit := do
   let some stateId := (advance.getObjVal? "stateId" >>= Json.getNat?).toOption
     | check suite "accepted actions return numeric state ids" false
   let inspected ← computeTyped context (mkRequest "proof.inspectState"
-    (Json.mkObj [("stateId", toJson stateId)]))
+    (Json.mkObj [("stateId", toJson stateId)]) "inspect-1" (some attemptId))
   check suite "stored proof states can be inspected"
     ((inspected.getObjValAs? Bool "ok").toOption == some true)
+
+  let wrongOwner ← computeTyped context (mkRequest "proof.inspectState"
+    (Json.mkObj [("stateId", toJson stateId)]) "inspect-wrong-owner" (some otherAttemptId))
+  check suite "proof states cannot cross attempt boundaries"
+    (errorCode? wrongOwner == some "RESEARCH_STATE_ERROR")
+
+  match ← Research.readEvents context.workRoot ⟨attemptId⟩ with
+  | .error message => check suite "agent activity has a valid event stream" false message
+  | .ok events =>
+      check suite "premise retrieval is recorded"
+        (events.any fun event => match event.payload with
+          | .retrievalPerformed value => value.retrievalId == ⟨"retrieval-1"⟩
+          | _ => false)
+      check suite "batch actions and evaluations are recorded"
+        ((events.filter fun event => match event.payload with
+          | .actionProposed _ | .actionEvaluated _ => true
+          | _ => false).size == 6)
+      check suite "agent provenance reaches durable events"
+        (events.all fun event => event.actor.name == "test-agent" && event.actor.model? == some "test-model")
+  if ← attemptPath.pathExists then IO.FS.removeFile attemptPath
+  if ← otherAttemptPath.pathExists then IO.FS.removeFile otherAttemptPath
 
 end Frontier.Test

@@ -234,10 +234,11 @@ Ordered by value per unit of work, following the build order above.
 1. **Done.** Stable declaration records in the catalog export: name, denoted proposition, kind,
    catalog metadata, minimal dependencies, and audited axioms, at `schemaVersion` 2.
 2. **Done.** `--json` on every one-shot command, and a typed `frontier.agent/v1` protocol for a
-   warm environment. Native operations cover capabilities, environment description, declaration
-   search, premise retrieval, independent batch tactic evaluation, and proof-state inspection.
-   `frontier check` remains the local propose-check-iterate loop that does not require editing
-   the registry.
+   warm environment. Native operations cover capabilities, environment description, attempt
+   creation, declaration search, premise retrieval, independent batch tactic evaluation, and
+   proof-state inspection. Attempt-scoped retrievals and proof evaluations append their complete
+   inputs and outcomes to the research event stream. `frontier check` remains the local
+   propose-check-iterate loop that does not require editing the registry.
 3. **Done.** Negative fixtures for the audit (`lake exe frontier-test`), including that a
    `sorry` and a `native_decide` are rejected in a draft. The gate is only worth what its
    rejections are worth, and those were previously untested.
