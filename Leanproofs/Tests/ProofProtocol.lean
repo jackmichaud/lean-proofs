@@ -47,19 +47,6 @@ def testParsing (suite : Suite) : IO Unit := do
   check suite "a non-numeric option value is an error"
     ((takeNat "--limit" 25 ["search", "--limit", "many"]).toOption.isNone)
 
-  check suite "a JSON array request parses"
-    ((parseRequest "[\"search\",\"pow_card\"]").toOption == some ["search", "pow_card"])
-  -- The array form exists so a quoted goal survives; splitting on spaces would destroy it.
-  check suite "a JSON array request preserves spaces inside an argument"
-    ((parseRequest "[\"suggest\",\"--goal\",\"a b c\"]").toOption
-      == some ["suggest", "--goal", "a b c"])
-  check suite "a bare command line parses"
-    ((parseRequest "  search pow_card  ").toOption == some ["search", "pow_card"])
-  check suite "malformed JSON is an error"
-    ((parseRequest "[\"search\",").toOption.isNone)
-  check suite "a non-string argument is an error"
-    ((parseRequest "[\"search\", 5]").toOption.isNone)
-
 /-! ## Interactive proving
 
 The claim `prove` makes is that a goal state it reports is the goal state Lean produces when
@@ -232,4 +219,3 @@ def testDispatch (suite : Suite) (context : Context) : IO Unit := do
 
 
 end Frontier.Test
-

@@ -93,14 +93,16 @@ axiom allowlist and the reason each denied axiom is denied.
 ## Work journal
 
 `check` is stateless: it tells you whether a file is acceptable and forgets. The journal is
-where the work between "here is a goal" and "here is a catalog entry" lives — one JSON file per
-item under `work/`, committed, so an attempt survives the session that produced it.
+where the work between "here is a goal" and "here is a catalog entry" lives — one append-only
+JSONL event stream per attempt under `work/`, committed, so its history survives the session
+that produced it.
 
 ```bash
 lake exe frontier work add "Formalize X" --goal 'the proposition' --note 'why it is stuck'
 lake exe frontier check --work formalize-x Draft.lean   # records axioms, reuse, diagnostics
 lake exe frontier work list --stage blocked
 lake exe frontier work set formalize-x --stage registered --entry <catalog id>
+lake exe frontier work abandon formalize-x --reason 'superseded by another approach'
 ```
 
 The journal is **untrusted**: a record of attempts, not evidence about mathematics, and it says
@@ -123,12 +125,15 @@ command pays it. `frontier serve` imports once and then answers requests on stdi
 per line, one JSON response per line:
 
 ```bash
-printf '%s\n' '["search","pow_card","--limit","3"]' '["check","Draft.lean"]' | lake exe frontier serve
+printf '%s\n' '{"apiVersion":"frontier.agent/v1","requestId":"req-1","operation":"declarations.search","params":{"query":"pow_card","limit":3,"includeDefinitions":false},"provenance":{"actor":"example-agent"}}' | lake exe frontier serve
 ```
 
-A request is a JSON array of arguments; a bare command line also works for driving a session by
-hand, but it splits on spaces and so cannot carry a quoted `--goal`. Each response is
-`{"command":…,"ok":…,"exitCode":…,"result":…}`. `quit` or EOF ends the session.
+Each line is a versioned request envelope with an operation-specific `params` object, caller
+`provenance`, and a unique `requestId`. Responses preserve that correlation id and report the
+loaded environment identifier; clients may send it back as `environment` to reject accidental
+execution against a different snapshot. Start with `capabilities.get` to discover the supported
+operations. Legacy argument arrays and bare commands are intentionally rejected. EOF ends the
+session.
 
 The premise corpus is prepared once per session — every imported theorem reduced to sorted
 constant arrays and an IDF mass — on the first `suggest`. That call pays for the whole corpus;
@@ -166,7 +171,7 @@ decides.
 - `Leanproofs/Test.lean`, `Leanproofs/TestMain.lean`: negative fixtures for the audit.
 - `Leanproofs/Fermat.lean`, `Leanproofs/Catalan.lean`: checked mathematical results.
 - `web/`: research workspace, generated catalog data, and the published work journal.
-- `work/`: the work journal itself, one JSON file per item.
+- `work/`: the work journal itself, one append-only JSONL event stream per attempt.
 - `scripts/`: catalog comparison and browser QA.
 - `docs/`: trust model, architecture, and contribution workflow.
 - `external/`: git-ignored scratch. **Not compiled and not verified by anything** — a `sorry`

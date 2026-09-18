@@ -9,9 +9,8 @@ import Leanproofs.Frontier.Command
 /-!
 # Frontier agent API
 
-A typed, versioned envelope for local agents. This is a protocol model, not a network or
-authority boundary: `frontier serve` remains a local process and typed requests have exactly
-the same authority as the legacy argument-array protocol.
+The only protocol accepted by `frontier serve`. This is a local process protocol, not a
+network or remote authority boundary.
 -/
 
 open Lean
@@ -23,19 +22,23 @@ def version : String := "frontier.agent/v1"
 /-- Stable machine-readable failures. New cases may be added without changing existing codes. -/
 inductive ErrorCode where
   | invalidRequest
+  | invalidParams
   | unsupportedApiVersion
   | unsupportedOperation
   | environmentMismatch
-  | commandFailed
+  | invalidGoal
+  | stateNotFound
   | internalError
   deriving BEq, DecidableEq, Inhabited, Repr
 
 def ErrorCode.toString : ErrorCode → String
   | .invalidRequest => "INVALID_REQUEST"
+  | .invalidParams => "INVALID_PARAMS"
   | .unsupportedApiVersion => "UNSUPPORTED_API_VERSION"
   | .unsupportedOperation => "UNSUPPORTED_OPERATION"
   | .environmentMismatch => "ENVIRONMENT_MISMATCH"
-  | .commandFailed => "COMMAND_FAILED"
+  | .invalidGoal => "INVALID_GOAL"
+  | .stateNotFound => "STATE_NOT_FOUND"
   | .internalError => "INTERNAL_ERROR"
 
 structure Error where
@@ -53,6 +56,47 @@ structure Request where
   params : Json
   provenance : Json
   deriving Inhabited
+
+structure SearchParams where
+  query : String
+  limit : Nat := CLI.defaultSearchLimit
+  includeDefinitions : Bool := false
+
+structure PremiseParams where
+  goal : String
+  limit : Nat := CLI.defaultSuggestLimit
+
+structure BatchAction where
+  id : String
+  tactic : String
+
+inductive BatchOrigin where
+  | goal (source : String)
+  | parentState (id : Nat)
+
+structure BatchParams where
+  origin : BatchOrigin
+  actions : Array BatchAction
+  heartbeats : Nat := CLI.defaultTacticHeartbeats
+
+structure InspectParams where
+  stateId : Nat
+  heartbeats : Nat := CLI.defaultTacticHeartbeats
+
+private def fail (code : ErrorCode) (message : String) : Except Error α :=
+  .error { code, message }
+
+private def exactObject (json : Json) (required optional : List String)
+    (code : ErrorCode := .invalidParams) : Except Error Unit := do
+  let fields ← json.getObj? |>.mapError fun _ => { code, message := "expected a JSON object" }
+  let actual := fields.foldl (init := []) fun keys key _ => key :: keys
+  let allowed := required ++ optional
+  let unexpected := actual.filter fun key => !allowed.contains key
+  let missing := required.filter fun key => !actual.contains key
+  unless unexpected.isEmpty do
+    throw { code, message := s!"unexpected field(s): {", ".intercalate unexpected}" }
+  unless missing.isEmpty do
+    throw { code, message := s!"missing field(s): {", ".intercalate missing}" }
 
 private def requiredString (json : Json) (key : String) : Except Error String := do
   let value ← json.getObjVal? key |>.mapError fun _ =>
@@ -86,11 +130,36 @@ private def requiredObject (json : Json) (key : String) : Except Error Json := d
     { code := .invalidRequest, message := s!"field '{key}' must be an object" }
   return value
 
-/-- Decode a typed request object. Legacy arrays are intentionally decoded by `Protocol` so
-their accepted syntax and error responses remain byte-for-byte compatible. -/
+private def paramField (json : Json) (key : String) : Except Error Json :=
+  json.getObjVal? key |>.mapError fun _ =>
+    { code := .invalidParams, message := s!"missing required field '{key}'" }
+
+private def paramString (json : Json) (key : String) : Except Error String := do
+  let value ← (← paramField json key).getStr? |>.mapError fun _ =>
+    { code := .invalidParams, message := s!"field '{key}' must be a string" }
+  if value.isEmpty then fail .invalidParams s!"field '{key}' must not be empty"
+  return value
+
+private def paramNat (json : Json) (key : String) : Except Error Nat := do
+  (← paramField json key).getNat? |>.mapError fun _ =>
+    { code := .invalidParams, message := s!"field '{key}' must be a non-negative integer" }
+
+private def optionalNat (json : Json) (key : String) (fallback : Nat) : Except Error Nat :=
+  match json.getObjVal? key with
+  | .error _ => .ok fallback
+  | .ok value => value.getNat? |>.mapError fun _ =>
+      { code := .invalidParams, message := s!"field '{key}' must be a non-negative integer" }
+
+private def optionalBool (json : Json) (key : String) (fallback : Bool) : Except Error Bool :=
+  match json.getObjVal? key with
+  | .error _ => .ok fallback
+  | .ok value => value.getBool? |>.mapError fun _ =>
+      { code := .invalidParams, message := s!"field '{key}' must be a boolean" }
+
+/-- Decode the exact typed request envelope. Arrays and unknown envelope fields are rejected. -/
 def requestOfJson (json : Json) : Except Error Request := do
-  let _ ← json.getObj? |>.mapError fun _ =>
-    { code := .invalidRequest, message := "a typed request must be a JSON object" }
+  exactObject json ["apiVersion", "requestId", "operation", "params", "provenance"]
+    ["environment"] .invalidRequest
   return {
     apiVersion := ← requiredString json "apiVersion"
     requestId := ← requiredString json "requestId"
@@ -156,10 +225,12 @@ def failureResponse (context : CLI.Context) (requestId? operation? : Option Stri
 def capabilitiesJson : Json :=
   Json.mkObj [
     ("apiVersions", toJson #[version]),
-    ("operations", toJson #["capabilities.get", "environment.describe", "cli.execute"]),
-    ("legacyArrayProtocol", toJson true),
+    ("operations", toJson #["capabilities.get", "environment.describe",
+      "declarations.search", "premises.retrieve", "proof.evaluateBatch",
+      "proof.inspectState"]),
     ("transport", toJson "local-ndjson"),
-    ("authority", toJson "local-process")
+    ("authority", toJson "local-process"),
+    ("remoteAuthority", toJson false)
   ]
 
 def environmentJson (context : CLI.Context) : Json :=
@@ -184,22 +255,70 @@ def validateRequest (context : CLI.Context) (request : Request) : Except Error U
         message := s!"request targets environment '{requested}', but '{loaded}' is loaded"
       }
 
-/-- Read the explicit compatibility operation's argument array. No other operation can reach
-the legacy dispatcher through this function. -/
-def cliArgs (request : Request) : Except Error (List String) := do
-  let value ← request.params.getObjVal? "args" |>.mapError fun _ => {
-    code := .invalidRequest
-    message := "operation 'cli.execute' requires params.args"
+def emptyParams (request : Request) : Except Error Unit :=
+  exactObject request.params [] []
+
+def searchParams (request : Request) : Except Error SearchParams := do
+  exactObject request.params ["query"] ["limit", "includeDefinitions"]
+  let query ← paramString request.params "query"
+  if query.trimAscii.isEmpty then fail .invalidParams "field 'query' must not be blank"
+  let limit ← optionalNat request.params "limit" CLI.defaultSearchLimit
+  if limit == 0 then fail .invalidParams "field 'limit' must be positive"
+  return {
+    query
+    limit
+    includeDefinitions := ← optionalBool request.params "includeDefinitions" false
   }
-  let values ← value.getArr? |>.mapError fun _ => {
-    code := .invalidRequest
-    message := "field 'params.args' must be an array of strings"
-  }
-  let args ← values.mapM fun value =>
-    value.getStr? |>.mapError fun _ => {
-      code := .invalidRequest
-      message := "field 'params.args' must be an array of strings"
-    }
-  return args.toList
+
+def premiseParams (request : Request) : Except Error PremiseParams := do
+  exactObject request.params ["goal"] ["limit"]
+  let goal ← paramString request.params "goal"
+  if goal.trimAscii.isEmpty then fail .invalidParams "field 'goal' must not be blank"
+  let limit ← optionalNat request.params "limit" CLI.defaultSuggestLimit
+  if limit == 0 then fail .invalidParams "field 'limit' must be positive"
+  return { goal, limit }
+
+private def batchAction (json : Json) : Except Error BatchAction := do
+  exactObject json ["id", "tactic"] []
+  let id ← paramString json "id"
+  let tactic ← paramString json "tactic"
+  if tactic.trimAscii.isEmpty then fail .invalidParams "field 'tactic' must not be blank"
+  return { id, tactic }
+
+def batchParams (request : Request) : Except Error BatchParams := do
+  exactObject request.params ["actions"] ["goal", "parentStateId", "heartbeats"]
+  let goal? ← match request.params.getObjVal? "goal" with
+    | .error _ => pure none
+    | .ok value => some <$> (value.getStr? |>.mapError fun _ =>
+        { code := .invalidParams, message := "field 'goal' must be a string" })
+  let state? ← match request.params.getObjVal? "parentStateId" with
+    | .error _ => pure none
+    | .ok value => some <$> (value.getNat? |>.mapError fun _ =>
+        { code := .invalidParams,
+          message := "field 'parentStateId' must be a non-negative integer" })
+  let origin ← match goal?, state? with
+    | some goal, none =>
+        if goal.trimAscii.isEmpty then fail .invalidParams "field 'goal' must not be blank"
+        else pure (.goal goal)
+    | none, some id => pure (.parentState id)
+    | none, none => fail .invalidParams "exactly one of 'goal' or 'parentStateId' is required"
+    | some _, some _ => fail .invalidParams "'goal' and 'parentStateId' are mutually exclusive"
+  let values ← (← paramField request.params "actions").getArr? |>.mapError fun _ =>
+    { code := .invalidParams, message := "field 'actions' must be an array" }
+  if values.isEmpty then fail .invalidParams "field 'actions' must not be empty"
+  let actions ← values.mapM batchAction
+  let ids := actions.map (·.id)
+  unless ids.toList.Pairwise (· != ·) do
+    fail .invalidParams "action ids must be unique within a batch"
+  let heartbeats ← optionalNat request.params "heartbeats" CLI.defaultTacticHeartbeats
+  if heartbeats == 0 then fail .invalidParams "field 'heartbeats' must be positive in a session"
+  return { origin, actions, heartbeats }
+
+def inspectParams (request : Request) : Except Error InspectParams := do
+  exactObject request.params ["stateId"] ["heartbeats"]
+  let stateId ← paramNat request.params "stateId"
+  let heartbeats ← optionalNat request.params "heartbeats" CLI.defaultTacticHeartbeats
+  if heartbeats == 0 then fail .invalidParams "field 'heartbeats' must be positive in a session"
+  return { stateId, heartbeats }
 
 end Frontier.API

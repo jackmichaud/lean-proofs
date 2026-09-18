@@ -1,20 +1,35 @@
 {"trusted": false,
  "stages": ["exploring", "drafting", "blocked", "clean", "registered", "abandoned"],
- "schemaVersion": 1,
+ "schemaVersion": 2,
  "problems": [],
- "note": "Work in progress. Untrusted: a record of attempts, not verified results.",
+ "note": "Untrusted research history. Events record activity and are not mathematical evidence.",
  "items":
- [{"updated": "2026-09-08T16:49:00Z",
-   "title": "Probe item",
+ [{"updated": "2026-09-18T16:05:44Z",
+   "title": "Register a genuinely unresolved problem",
    "stage": "exploring",
-   "note": null,
+   "note":
+   "The substrate is untested against its actual purpose while literatureUnresolved is 0. Needs a research decision about which problem.",
    "lastCheck": null,
-   "id": "probe-item",
-   "goal": "demo",
+   "id": "register-a-genuinely-unresolved-problem",
+   "goal":
+   "Add a catalog entry with literature=unresolved, so the registry carries a real research frontier rather than only formalized known results.",
    "entry": null,
    "draft": null,
-   "created": "2026-09-08T16:49:00Z",
+   "created": "2026-09-18T16:05:44Z",
+   "attempts": 0},
+  {"updated": "2026-09-18T16:05:22Z",
+   "title": "Formalize Mihailescu's proof of Catalan's conjecture",
+   "stage": "exploring",
+   "note":
+   "Registry entry catalan-conjecture is status=open, literature=proved. This is formalization backlog, not a research frontier.",
+   "lastCheck": null,
+   "id": "formalize-mihailescu-s-proof-of-catalan-s-conjecture",
+   "goal":
+   "Prove Catalan.conjecture in Lean, replacing the open registry entry with a certificate.",
+   "entry": null,
+   "draft": null,
+   "created": "2026-09-18T16:05:22Z",
    "attempts": 0}],
- "generated": "2026-09-08T16:49:00Z",
+ "generated": "2026-09-18T16:05:45Z",
  "counts":
- {"registered": 0, "exploring": 1, "drafting": 0, "clean": 0, "blocked": 0, "abandoned": 0}}
+ {"registered": 0, "exploring": 2, "drafting": 0, "clean": 0, "blocked": 0, "abandoned": 0}}

@@ -165,10 +165,14 @@ def compute (context : Context) (args : List String) : IO Payload := do
                           --stage, --goal, --draft, --note, --entry"
                       workSet context id stage? goal? draft? note? entry?
                   | _ => return .failure "work set expects exactly one item id"
-          | "remove" =>
-              match rest with
-              | [id] => workRemove context id
-              | _ => return .failure "work remove expects exactly one item id"
+          | "abandon" =>
+              match takeString "--reason" rest with
+              | .error message => return .failure message
+              | .ok (some reason, [id]) => workAbandon context id reason
+              | .ok (none, _) =>
+                  return .failure "work abandon requires --reason '<reason>'"
+              | .ok (_, _) =>
+                  return .failure "work abandon expects exactly one item id"
           | "export" =>
               match rest with
               | [] => workExport context Journal.defaultExportPath
@@ -176,7 +180,7 @@ def compute (context : Context) (args : List String) : IO Payload := do
               | _ => return .failure "work export expects at most one path"
           | _ =>
               return .failure s!"unknown work subcommand '{subcommand}'; \
-                expected list, add, show, set, remove, or export"
+                expected list, add, show, set, abandon, or export"
     | "search" =>
         let (definitions, rest) := takeFlag "--definitions" rest
         match takeNat "--limit" defaultSearchLimit rest with
@@ -271,131 +275,140 @@ def emit (asJson : Bool) (payload : Payload) : IO UInt32 := do
   if asJson then IO.println payload.toJson.compress else payload.print
   return payload.exitCode
 
-/-! ## Serve
+/-! ## Typed local agent protocol -/
 
-Importing mathlib with `loadExts := true` costs roughly twenty seconds, and every one-shot
-command pays it in full. An agent ranking premises or iterating on a draft makes many calls, so
-the environment has to outlive a single command or the tool is unusable for its main purpose.
+private def actionOutcomeString : ProofActionOutcome → String
+  | .accepted => "accepted"
+  | .complete => "complete"
+  | .rejected => "rejected"
+  | .policyRejected => "policyRejected"
+  | .failed => "failed"
 
-`frontier serve` imports once and then answers requests on stdin: one request per line, one
-JSON response per line. The protocol is newline-delimited JSON rather than anything richer
-precisely so that a caller can speak it from a pipe with no client library.
+private def proofStepJson (step : ProofStep) : Json := Json.mkObj [
+  ("stateId", toJson step.id),
+  ("goals", toJson step.goals),
+  ("errors", toJson step.errors),
+  ("axioms", toJson (step.axioms.map Name.toString)),
+  ("policyErrors", toJson step.policyErrors),
+  ("script", toJson step.script),
+  ("complete", toJson step.isComplete)
+]
 
-## This is a local tool, not a service
+private def actionResultJson (result : ProofActionResult) : Json :=
+  let stepFields := match result.step? with
+    | some step => proofStepJson step
+    | none => Json.mkObj [
+        ("stateId", .null), ("goals", toJson (#[] : Array String)),
+        ("errors", toJson (result.error?.toArray)),
+        ("axioms", toJson (#[] : Array String)),
+        ("policyErrors", toJson (#[] : Array String)),
+        ("script", toJson (#[] : Array String)), ("complete", toJson false)]
+  Json.mergeObj (Json.mkObj [
+    ("actionId", toJson result.actionId),
+    ("outcome", toJson (actionOutcomeString result.outcome)),
+    ("error", match result.error? with | some value => toJson value | none => .null)
+  ]) stepFields
 
-A session speaks a request protocol and holds state, which makes it look like something to put
-behind a socket. It is not. `serve` exposes `check`, which elaborates a Lean file in this
-process — and elaboration runs arbitrary code, so anything that can hand a path to a session
-can run code as whoever started it. Reachability is the only difference between that and
-`frontier check`, and reachability is the whole risk.
+private def requestFailure (context : Context) (request : API.Request) (error : API.Error) : Json :=
+  API.failureResponse context (some request.requestId) (some request.operation) error
 
-Exposing this beyond the local process needs the sandbox described in
-`docs/retrieval-and-agents.md`: process isolation, resource limits, a syntactic prescreen, and
-the axiom policy at the gate. Until then, one session per agent, on the agent's own machine.
--/
+private def invalidGoal (context : Context) (request : API.Request) (message : String) : Json :=
+  requestFailure context request { code := .invalidGoal, message }
 
-/-- Parse one request line.
+private def missingState (context : Context) (request : API.Request) (message : String) : Json :=
+  requestFailure context request { code := .stateNotFound, message }
 
-A JSON array is the real protocol. A bare command line is also accepted so a human can drive a
-session by hand, but it splits on spaces and therefore cannot carry a quoted `--goal`; that is
-what the array form is for. -/
-def parseRequest (line : String) : Except String (List String) :=
-  let trimmed := line.trimAscii.toString
-  if trimmed.startsWith "[" then
-    match Json.parse trimmed with
-    | .error message => .error s!"invalid JSON request: {message}"
-    | .ok json =>
-        match json.getArr? with
-        | .error message => .error s!"a JSON request must be an array of arguments: {message}"
-        | .ok values =>
-            match values.mapM Json.getStr? with
-            | .error message => .error s!"every argument must be a string: {message}"
-            | .ok args => .ok args.toList
-  else
-    .ok ((trimmed.splitOn " ").filter (!·.isEmpty))
-
-/-- Execute one typed request. The typed layer is deliberately a small allowlist: adding an
-operation requires an explicit branch, so a typo or future operation can never look like a
-successful empty command. -/
 def computeTyped (context : Context) (request : API.Request) : IO Json := do
   match API.validateRequest context request with
-  | .error error =>
-      return API.failureResponse context (some request.requestId) (some request.operation) error
+  | .error error => return requestFailure context request error
   | .ok () =>
       match request.operation with
       | "capabilities.get" =>
+          if let .error error := API.emptyParams request then return requestFailure context request error
           return API.successResponse context request API.capabilitiesJson
       | "environment.describe" =>
+          if let .error error := API.emptyParams request then return requestFailure context request error
           return API.successResponse context request (API.environmentJson context)
-      | "cli.execute" =>
-          match API.cliArgs request with
-          | .error error =>
-              return API.failureResponse context (some request.requestId)
-                (some request.operation) error
-          | .ok args =>
-              let payload ← try compute context args
-                catch exception =>
-                  return API.failureResponse context (some request.requestId)
-                    (some request.operation) {
-                      code := .internalError
-                      message := exception.toString
-                    }
-              if payload.exitCode == 0 then
-                return API.successResponse context request (Json.mkObj [
-                  ("command", toJson (args.headD "")),
-                  ("exitCode", toJson payload.exitCode.toNat),
-                  ("result", payload.toJson)
-                ])
-              else
-                let message := match payload with
-                  | .failure message => message
-                  | _ => s!"command '{args.headD ""}' returned a nonzero exit code"
-                return API.responseJson (some request.requestId) (some request.operation)
-                  (API.environmentId context) (some (Json.mkObj [
-                    ("command", toJson (args.headD "")),
-                    ("exitCode", toJson payload.exitCode.toNat),
-                    ("result", payload.toJson)
-                  ])) (some { code := .commandFailed, message })
+      | "declarations.search" =>
+          match API.searchParams request with
+          | .error error => return requestFailure context request error
+          | .ok params =>
+              let (hits, total) ← searchDeclarations context params.query params.limit
+                params.includeDefinitions
+              return API.successResponse context request (Json.mkObj [
+                ("query", toJson params.query), ("total", toJson total),
+                ("hits", Json.arr (hits.map searchHitJson))])
+      | "premises.retrieve" =>
+          match API.premiseParams request with
+          | .error error => return requestFailure context request error
+          | .ok params =>
+              match ← elabProposition context.env params.goal with
+              | .error message => return invalidGoal context request message
+              | .ok goal =>
+                  let candidates ← rankPremises context goal {} params.limit
+                  return API.successResponse context request (Json.mkObj [
+                    ("goal", toJson params.goal),
+                    ("proposition", toJson (← prettyExpr context.env goal)),
+                    ("candidates", Json.arr (candidates.map premiseJson))])
+      | "proof.evaluateBatch" =>
+          match API.batchParams request with
+          | .error error => return requestFailure context request error
+          | .ok params =>
+              let origin? : Except String ProofOrigin ← match params.origin with
+                | .goal source =>
+                    match ← elabProposition context.env source params.heartbeats with
+                    | .error message => pure (.error message)
+                    | .ok _ => pure (.ok (ProofOrigin.proposition source))
+                | .parentState id =>
+                    match ← context.proofState? id with
+                    | .error message => pure (.error message)
+                    | .ok state => pure (.ok (ProofOrigin.resume state))
+              match origin? with
+              | .error message =>
+                  match params.origin with
+                  | .goal _ => return invalidGoal context request message
+                  | .parentState _ => return missingState context request message
+              | .ok origin =>
+                  let actions := params.actions.map fun action =>
+                    ({ id := action.id, tactic := action.tactic } : ProofAction)
+                  let batch ← runProofBatch context origin actions params.heartbeats
+                  return API.successResponse context request (Json.mkObj [
+                    ("results", Json.arr (batch.results.map actionResultJson))])
+      | "proof.inspectState" =>
+          match API.inspectParams request with
+          | .error error => return requestFailure context request error
+          | .ok params =>
+              match ← context.proofState? params.stateId with
+              | .error message => return missingState context request message
+              | .ok state =>
+                  match ← runProofStep context (.resume state) none params.heartbeats with
+                  | .error message => return invalidGoal context request message
+                  | .ok step =>
+                      return API.successResponse context request (Json.mergeObj
+                        (Json.mkObj [("requestedStateId", toJson params.stateId)])
+                        (proofStepJson step))
       | operation =>
-          return API.failureResponse context (some request.requestId) (some operation) {
+          return requestFailure context request {
             code := .unsupportedOperation
             message := s!"unsupported operation '{operation}'"
           }
+
+/-- Parse and execute one request line. Invalid envelopes still preserve recoverable correlation
+fields, and no malformed request terminates the warm session. -/
+def handleRequest (context : Context) (source : String) : IO Json :=
+  match API.parseRequest source with
+  | .error error =>
+      let (requestId?, operation?) := API.requestMetadata source
+      pure (API.failureResponse context requestId? operation? error)
+  | .ok request => try computeTyped context request catch exception =>
+      pure (requestFailure context request { code := .internalError, message := exception.toString })
 
 partial def serveLoop (context : Context) (stdin stdout : IO.FS.Stream) : IO Unit := do
   let line ← stdin.getLine
   if line.isEmpty then return ()                       -- EOF ends the session
   let request := line.trimAscii.toString
-  if request == "quit" || request == "exit" then return ()
   unless request.isEmpty do
-    let response ←
-      if request.startsWith "{" then
-        match API.parseRequest request with
-        | .error error =>
-            let (requestId?, operation?) := API.requestMetadata request
-            pure (API.failureResponse context requestId? operation? error)
-        | .ok typed =>
-            -- A malformed request must not end a session an agent is minutes into.
-            try computeTyped context typed
-            catch exception =>
-              pure (API.failureResponse context (some typed.requestId) (some typed.operation) {
-                code := .internalError
-                message := exception.toString
-              })
-      else
-        let (command, payload) ←
-          match parseRequest request with
-          | .error message => pure ("", Payload.failure message)
-          | .ok args => do
-              let payload ← try compute context args
-                catch exception => pure (Payload.failure exception.toString)
-              pure (args.headD "", payload)
-        pure <| Json.mkObj [
-          ("command", toJson command),
-          ("ok", toJson (payload.exitCode == 0)),
-          ("exitCode", toJson payload.exitCode.toNat),
-          ("result", payload.toJson)
-        ]
+    let response ← handleRequest context request
     stdout.putStr (response.compress ++ "\n")
     stdout.flush
   serveLoop context stdin stdout
@@ -409,10 +422,9 @@ def runServe (context : Context) : IO UInt32 := do
   let banner := Json.mkObj [
     ("ready", toJson true),
     ("project", toJson "Frontier"),
-    ("schemaVersion", toJson (2 : Nat)),
-    ("entries", toJson context.catalog.size),
-    ("workRoot", toJson context.workRoot.toString),
-    ("usage", toJson usageLines)
+    ("apiVersion", toJson API.version),
+    ("environment", toJson (API.environmentId context)),
+    ("operations", API.capabilitiesJson)
   ]
   stdout.putStr (banner.compress ++ "\n")
   stdout.flush

@@ -8,6 +8,7 @@ import Leanproofs.Tests.TrustAudit
 import Leanproofs.Tests.DraftRetrieval
 import Leanproofs.Tests.JournalWork
 import Leanproofs.Tests.ProofProtocol
+import Leanproofs.Tests.BatchProof
 import Leanproofs.Tests.Knowledge
 import Leanproofs.Tests.API
 import Leanproofs.Tests.ResearchEvents
@@ -41,6 +42,7 @@ def run (context : Context) : IO UInt32 := do
   testWorkCommands suite context
   testCheckRecording suite context
   testProving suite context
+  testBatchProof suite context
   testDispatch suite context
   testKnowledgeModel suite
   testAPI suite context

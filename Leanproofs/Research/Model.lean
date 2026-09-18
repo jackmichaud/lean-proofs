@@ -70,11 +70,46 @@ structure Actor where
   configuration? : Option String := none
   deriving BEq, Inhabited, Repr
 
-structure AttemptCreated where
+/-- Work-board state. `clean` and `registered` are derived from check and promotion events;
+ordinary stage-change events may not assert them. -/
+inductive Stage where
+  | exploring | drafting | blocked | clean | registered | abandoned
+  deriving BEq, DecidableEq, Inhabited, Repr
+
+def Stage.toString : Stage → String
+  | .exploring => "exploring" | .drafting => "drafting" | .blocked => "blocked"
+  | .clean => "clean" | .registered => "registered" | .abandoned => "abandoned"
+
+def Stage.ofString (value : String) : Except String Stage :=
+  match value with
+  | "exploring" => .ok .exploring | "drafting" => .ok .drafting
+  | "blocked" => .ok .blocked | "clean" => .ok .clean
+  | "registered" => .ok .registered | "abandoned" => .ok .abandoned
+  | _ => .error s!"unknown research stage '{value}'"
+
+/-- The complete editable work metadata. Updates repeat the complete value so clearing an
+optional field is unambiguous and materialization does not depend on patch semantics. -/
+structure WorkMetadata where
   title : String
   goal : String
+  draftPath? : Option String := none
+  note? : Option String := none
+  deriving BEq, Inhabited, Repr
+
+structure AttemptCreated where
+  metadata : WorkMetadata
   initialStateId? : Option ProofStateId := none
   parentAttemptId? : Option AttemptId := none
+  deriving BEq, Inhabited, Repr
+
+structure MetadataUpdated where
+  metadata : WorkMetadata
+  deriving BEq, Inhabited, Repr
+
+structure StageChanged where
+  fromStage : Stage
+  toStage : Stage
+  reason? : Option String := none
   deriving BEq, Inhabited, Repr
 
 structure RetrievalPerformed where
@@ -117,10 +152,14 @@ structure BranchAbandoned where
   reason : String
   deriving BEq, Inhabited, Repr
 
+/-- One verifier report. A clean report advances nonterminal work to `clean`; a non-clean
+report advances it to `drafting`. Reports on registered or abandoned attempts preserve stage. -/
 structure ArtifactChecked where
   artifact : String
   clean : Bool
   declarations : Nat := 0
+  reuses : Array String := #[]
+  axioms : Array String := #[]
   errors : Array String := #[]
   diagnostics : Array String := #[]
   deriving BEq, Inhabited, Repr
@@ -130,6 +169,7 @@ structure PolicyRejected where
   violations : Array String
   deriving BEq, Inhabited, Repr
 
+/-- Promotion is the only event that advances an attempt to `registered`. -/
 structure ArtifactPromoted where
   artifact : String
   catalogId : String
@@ -137,6 +177,8 @@ structure ArtifactPromoted where
 
 inductive Payload where
   | attemptCreated (value : AttemptCreated)
+  | metadataUpdated (value : MetadataUpdated)
+  | stageChanged (value : StageChanged)
   | retrievalPerformed (value : RetrievalPerformed)
   | actionProposed (value : ActionProposed)
   | actionEvaluated (value : ActionEvaluated)
@@ -149,6 +191,8 @@ inductive Payload where
 
 def Payload.kind : Payload → String
   | .attemptCreated _ => "attempt.created"
+  | .metadataUpdated _ => "attempt.metadata-updated"
+  | .stageChanged _ => "attempt.stage-changed"
   | .retrievalPerformed _ => "retrieval.performed"
   | .actionProposed _ => "action.proposed"
   | .actionEvaluated _ => "action.evaluated"
@@ -160,7 +204,7 @@ def Payload.kind : Payload → String
 
 /-- Sequence numbers begin at one and are contiguous within one attempt stream. -/
 structure Event where
-  schemaVersion : Nat := 1
+  schemaVersion : Nat := 2
   eventId : EventId
   attemptId : AttemptId
   sequence : Nat

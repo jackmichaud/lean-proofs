@@ -26,10 +26,11 @@ theorems retrieves nothing that `frontier search` does not.
 
 Recommended order, cheapest and highest-value first:
 
-0. **Done.** A machine-readable interface to what already exists. Every command takes `--json`,
-   and `frontier serve` answers newline-delimited JSON requests against an environment imported
-   once instead of once per command. This was the actual blocker: an agent cannot iterate
-   against a tool that costs twenty seconds a call and returns column-aligned prose.
+0. **Done.** A machine-readable interface to what already exists. Every one-shot command takes
+   `--json`, and `frontier serve` answers versioned, typed newline-delimited JSON requests
+   against an environment imported once instead of once per command. Requests carry correlation,
+   provenance, and optional environment pinning. This was the actual blocker: an agent cannot
+   iterate against a tool that costs twenty seconds a call and returns column-aligned prose.
 1. **Read-only MCP tools** over that interface. With `serve` in place this is a thin adapter
    from MCP tool calls to request lines, not new infrastructure.
 2. **Lexical and symbolic retrieval over mathlib.** Largely done. `frontier suggest` does
@@ -55,7 +56,7 @@ Recommended order, cheapest and highest-value first:
    that imports once. `prove` therefore drives `Elab.Tactic` against the environment already
    loaded, so tactics see exactly the declarations `check` and `suggest` do. The surface
    exposed to drift is four stable entry points; see the `## Proof state` section of
-   `Leanproofs/CLI.lean` for what that cost, which was not nothing.
+   `Leanproofs/Frontier/Proof.lean` for the resulting interaction boundary.
 
    Two findings from building it are worth carrying forward, because both were silent:
 
@@ -232,10 +233,11 @@ Ordered by value per unit of work, following the build order above.
 
 1. **Done.** Stable declaration records in the catalog export: name, denoted proposition, kind,
    catalog metadata, minimal dependencies, and audited axioms, at `schemaVersion` 2.
-2. **Done.** `--json` on every command, and `frontier serve` for a warm environment. Also
-   `frontier check`, which gives an agent a propose-check-iterate loop that does not require
-   editing the registry, and `frontier suggest --goal`, which ranks premises for a proposition
-   that is not registered yet.
+2. **Done.** `--json` on every one-shot command, and a typed `frontier.agent/v1` protocol for a
+   warm environment. Native operations cover capabilities, environment description, declaration
+   search, premise retrieval, independent batch tactic evaluation, and proof-state inspection.
+   `frontier check` remains the local propose-check-iterate loop that does not require editing
+   the registry.
 3. **Done.** Negative fixtures for the audit (`lake exe frontier-test`), including that a
    `sorry` and a `native_decide` are rejected in a draft. The gate is only worth what its
    rejections are worth, and those were previously untested.

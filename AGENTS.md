@@ -44,12 +44,15 @@ Importing mathlib with the delaborators loaded costs about twenty seconds, and e
 command pays it in full. If you are making more than a couple of calls, open a session:
 
 ```bash
-printf '%s\n' '["suggest","--goal","∀ n : ℕ, n + 0 = n"]' '["check","Draft.lean"]' \
+printf '%s\n' '{"apiVersion":"frontier.agent/v1","requestId":"req-1","operation":"premises.retrieve","params":{"goal":"∀ n : ℕ, n + 0 = n","limit":10},"provenance":{"actor":"research-agent"}}' \
   | lake exe frontier serve
 ```
 
-One JSON array of arguments per line in, one JSON response per line out. `--json` works on any
-one-shot command too. Prefer JSON over parsing the text output.
+One versioned JSON request envelope per line in, one correlated JSON response per line out.
+Begin with `capabilities.get`; supported operations include declaration search, premise
+retrieval, independent batch tactic evaluation, and proof-state inspection. Pin later requests
+to the environment id returned by the session. Legacy argument arrays and bare commands are not
+accepted. `--json` works on any one-shot command too.
 
 ## Things that will trip you up
 

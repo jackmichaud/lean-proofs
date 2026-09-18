@@ -110,7 +110,7 @@ inductive Payload where
   /-- One journal item. `headline` says what just happened to it, and is empty for a plain
   `work show`. -/
   | workItem (item : Journal.Item) (headline : String)
-  | workRemoved (id : String)
+  | workAbandoned (id : String)
   | failure (message : String)
 
 def Payload.exitCode : Payload → UInt32
@@ -141,7 +141,7 @@ def usageLines : Array String := #[
   "frontier work add <title> [--goal '<text>'] [--draft <file.lean>] [--note '<text>']",
   "frontier work show <item id>",
   "frontier work set <item id> [--stage <stage>] [--goal …] [--draft …] [--note …] [--entry …]",
-  "frontier work remove <item id>",
+  "frontier work abandon <item id> --reason '<reason>'",
   "frontier work export [path]",
   "frontier graph",
   "frontier policy",
@@ -164,10 +164,10 @@ def helpText : String :=
     the two verdicts: a tactic reports an unknown identifier as a message and returns `sorry`,\n\
     so `closed` means only that no goals remain. `complete` is the one that means proved --\n\
     no goals, no errors, and a proof term inside the axiom policy.\n\n\
-    `work` is a durable, untrusted record of research in progress, one JSON file per item\n\
-    under work/. It is not a submission endpoint: nothing there is executed, and `clean` and\n\
-    `registered` cannot be set by hand — the first needs a passing `check --work`, the second\n\
-    a catalog entry that exists.\n\n\
+    `work` is a durable, untrusted append-only research history under work/. It is not a\n\
+    submission endpoint: nothing there is executed, `clean` requires a passing `check --work`,\n\
+    `registered` requires promotion to an existing catalog entry, and abandonment keeps the\n\
+    complete event stream.\n\n\
     `serve` imports the environment once and then answers one request per line on stdin,\n\
     writing one JSON response per line. Importing mathlib costs about twenty seconds, so any\n\
     caller making more than a couple of requests should use it.\n\n\
@@ -301,7 +301,7 @@ def Payload.toJson : Payload → Json
         ("trusted", Lean.toJson false),
         ("headline", Lean.toJson headline),
         ("item", Journal.itemJson item)]
-  | .workRemoved id => Json.mkObj [("removed", Lean.toJson id)]
+  | .workAbandoned id => Json.mkObj [("abandoned", Lean.toJson id)]
   | .failure message => Json.mkObj [("error", Lean.toJson message)]
 
 /-! ### Text rendering -/
@@ -510,7 +510,7 @@ def Payload.print : Payload → IO Unit
       unless headline.isEmpty do
         IO.println headline
       printWorkItem item
-  | .workRemoved id => IO.println s!"Removed work item '{id}'."
+  | .workAbandoned id => IO.println s!"Abandoned work item '{id}'; history retained."
   | .failure message => do
       IO.eprintln s!"error: {message}"
       IO.eprintln "Run `lake exe frontier help` for usage."

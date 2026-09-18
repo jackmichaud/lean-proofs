@@ -373,5 +373,80 @@ def runProofStep (context : Context) (origin : ProofOrigin) (tactic? : Option St
         scaffold := proofScaffold goalSource accepted
       }
 
+/-! ## Batch proof evaluation
+
+An agent normally has several plausible next tactics. Evaluating those actions one request at
+a time adds avoidable protocol latency and, more importantly, makes branching an implicit
+client convention. A batch makes the branch point explicit: every action below is evaluated
+against the same immutable `ProofOrigin`. `runProofStep` remains the sole implementation of
+replay, diagnostics, proof assembly, and trust auditing. -/
+
+/-- One caller-correlated candidate tactic in a batch. -/
+structure ProofAction where
+  /-- Opaque identifier supplied by the caller and returned unchanged. -/
+  id : String
+  tactic : String
+
+/-- The result class an agent needs when deciding which branch to explore next. -/
+inductive ProofActionOutcome where
+  /-- The tactic advanced the proof but left goals outstanding. -/
+  | accepted
+  /-- The tactic produced a complete proof within Frontier's axiom policy. -/
+  | complete
+  /-- Lean rejected the tactic and the parent branch remains available. -/
+  | rejected
+  /-- The tactic closed the goal, but its proof term violates the axiom policy. -/
+  | policyRejected
+  /-- The candidate could not be evaluated, for example because its syntax was malformed. -/
+  | failed
+  deriving BEq, Repr
+
+/-- One independently evaluated batch candidate. `step?` carries the ordinary single-step
+report whenever `runProofStep` produced one; `error?` carries its top-level failure otherwise. -/
+structure ProofActionResult where
+  actionId : String
+  outcome : ProofActionOutcome
+  step? : Option ProofStep
+  error? : Option String
+
+/-- Ordered results for a batch. There is exactly one result for every input action. -/
+structure ProofBatchResult where
+  results : Array ProofActionResult
+
+/-- Classify a successfully evaluated step without introducing a second notion of proof
+validity. Policy rejection takes precedence over closure, and Lean diagnostics take precedence
+over ordinary acceptance. -/
+def ProofStep.actionOutcome (step : ProofStep) : ProofActionOutcome :=
+  if !step.policyErrors.isEmpty then .policyRejected
+  else if !step.errors.isEmpty then .rejected
+  else if step.isComplete then .complete
+  else .accepted
+
+/-- Evaluate every candidate independently against `origin`.
+
+The heartbeat limit applies to each candidate exactly as it does to `runProofStep`. A failed or
+policy-invalid candidate is recorded in place and does not prevent later siblings from being
+evaluated. -/
+def runProofBatch (context : Context) (origin : ProofOrigin) (actions : Array ProofAction)
+    (heartbeats : Nat) : IO ProofBatchResult := do
+  let mut results := #[]
+  for action in actions do
+    match ← runProofStep context origin (some action.tactic) heartbeats with
+    | .ok step =>
+        results := results.push {
+          actionId := action.id
+          outcome := step.actionOutcome
+          step? := some step
+          error? := none
+        }
+    | .error message =>
+        results := results.push {
+          actionId := action.id
+          outcome := .failed
+          step? := none
+          error? := some message
+        }
+  return { results }
+
 
 end Frontier.CLI

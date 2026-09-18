@@ -8,9 +8,6 @@ import Leanproofs.Tests.Support
 
 /-!
 # Typed agent API tests
-
-Kept callable independently while the additive API settles; the main runner can adopt
-`testAPI` without changing this module.
 -/
 
 open Lean Frontier Frontier.CLI
@@ -24,7 +21,25 @@ private def errorCode? (json : Json) : Option String := do
   let error ← json.getObjVal? "error" |>.toOption
   fieldString? error "code"
 
+private def result? (json : Json) : Option Json :=
+  json.getObjVal? "result" |>.toOption
+
+private def mkRequest (operation : String) (params : Json) (requestId := "req-1") : API.Request := {
+  apiVersion := API.version
+  requestId
+  operation
+  environment? := none
+  params
+  provenance := Json.mkObj [("actor", toJson "test")]
+}
+
+private def actionResult? (response : Json) (id : String) : Option Json := do
+  let result ← result? response
+  let values ← (result.getObjVal? "results" >>= Json.getArr?).toOption
+  values.find? fun value => fieldString? value "actionId" == some id
+
 def testAPI (suite : Suite) (context : Context) : IO Unit := do
+  let context := { context with session := true }
   let source :=
     "{\"apiVersion\":\"frontier.agent/v1\",\"requestId\":\"req-1\"," ++
     "\"operation\":\"capabilities.get\",\"params\":{},\"provenance\":{\"actor\":\"test\"}}"
@@ -40,10 +55,12 @@ def testAPI (suite : Suite) (context : Context) : IO Unit := do
     ((API.parseRequest
       (source.replace ",\"provenance\":{\"actor\":\"test\"}" "")).toOption.isNone)
 
-  -- The original array parser remains the compatibility contract.
-  check suite "legacy arrays still preserve argument boundaries"
-    ((parseRequest "[\"suggest\",\"--goal\",\"a b c\"]").toOption
-      == some ["suggest", "--goal", "a b c"])
+  let arrayResponse ← handleRequest context "[\"policy\"]"
+  check suite "serve rejects legacy array requests"
+    (errorCode? arrayResponse == some "INVALID_REQUEST")
+  let bareResponse ← handleRequest context "policy"
+  check suite "serve rejects bare command requests"
+    (errorCode? bareResponse == some "INVALID_REQUEST")
 
   let request := parsed.toOption.get!
   let capabilities ← computeTyped context request
@@ -54,7 +71,7 @@ def testAPI (suite : Suite) (context : Context) : IO Unit := do
   check suite "capabilities succeed"
     ((capabilities.getObjValAs? Bool "ok").toOption == some true)
 
-  let unsupported := { request with operation := "proof.evaluateBatch" }
+  let unsupported := { request with operation := "cli.execute" }
   let unsupportedResponse ← computeTyped context unsupported
   check suite "unsupported typed operations fail explicitly"
     ((unsupportedResponse.getObjValAs? Bool "ok").toOption == some false
@@ -70,17 +87,72 @@ def testAPI (suite : Suite) (context : Context) : IO Unit := do
   check suite "environment pinning rejects a mismatch"
     (errorCode? wrongEnvironmentResponse == some "ENVIRONMENT_MISMATCH")
 
-  let cliRequest := { request with
-    operation := "cli.execute"
-    params := Json.mkObj [("args", toJson #["policy"])]
-  }
-  let cliResponse ← computeTyped context cliRequest
-  check suite "the typed compatibility operation routes through compute"
-    ((cliResponse.getObjValAs? Bool "ok").toOption == some true)
+  let malformedSearch ← computeTyped context (mkRequest "declarations.search"
+    (Json.mkObj [("query", toJson "Nat"), ("limit", toJson "many")]))
+  check suite "operation params are type checked"
+    (errorCode? malformedSearch == some "INVALID_PARAMS")
+  let extraSearch ← computeTyped context (mkRequest "declarations.search"
+    (Json.mkObj [("query", toJson "Nat"), ("surprise", toJson true)]))
+  check suite "operation params reject unknown fields"
+    (errorCode? extraSearch == some "INVALID_PARAMS")
 
-  let failedCli := { cliRequest with params := Json.mkObj [("args", toJson #["unknown"])] }
-  let failedCliResponse ← computeTyped context failedCli
-  check suite "legacy command failures remain failures in the typed envelope"
-    (errorCode? failedCliResponse == some "COMMAND_FAILED")
+  let search ← computeTyped context (mkRequest "declarations.search"
+    (Json.mkObj [("query", toJson "Nat.add_comm"), ("limit", toJson (3 : Nat))]))
+  check suite "declaration search is a native typed operation"
+    ((search.getObjValAs? Bool "ok").toOption == some true)
+
+  let premises ← computeTyped context (mkRequest "premises.retrieve"
+    (Json.mkObj [("goal", toJson "∀ n : ℕ, n + 0 = n"), ("limit", toJson (3 : Nat))]))
+  check suite "premise retrieval accepts a Lean goal"
+    ((premises.getObjValAs? Bool "ok").toOption == some true)
+  let badGoal ← computeTyped context (mkRequest "premises.retrieve"
+    (Json.mkObj [("goal", toJson "not valid Lean !!!")]))
+  check suite "invalid Lean goals have a stable error code"
+    (errorCode? badGoal == some "INVALID_GOAL")
+
+  let batchParams := Json.mkObj [
+    ("goal", toJson "∀ n : ℕ, n + 0 = n"),
+    ("actions", Json.arr #[
+      Json.mkObj [("id", toJson "advance"), ("tactic", toJson "intro n")],
+      Json.mkObj [("id", toJson "reject"), ("tactic", toJson "exact nonsense_lemma")],
+      Json.mkObj [("id", toJson "finish"), ("tactic", toJson "simp")]])]
+  let batch ← computeTyped context (mkRequest "proof.evaluateBatch" batchParams "batch-1")
+  check suite "batch responses preserve request correlation"
+    (fieldString? batch "requestId" == some "batch-1")
+  check suite "an accepted batch sibling advances independently"
+    ((actionResult? batch "advance" >>= fun value => fieldString? value "outcome")
+      == some "accepted")
+  check suite "a rejected batch sibling does not abort the batch"
+    ((actionResult? batch "reject" >>= fun value => fieldString? value "outcome")
+      == some "rejected")
+  check suite "a later batch sibling can still complete"
+    ((actionResult? batch "finish" >>= fun value => fieldString? value "outcome")
+      == some "complete")
+
+  let zeroHeartbeats ← computeTyped context (mkRequest "proof.evaluateBatch"
+    (Json.mergeObj batchParams (Json.mkObj [("heartbeats", toJson (0 : Nat))])))
+  check suite "sessions reject unbounded tactic evaluation"
+    (errorCode? zeroHeartbeats == some "INVALID_PARAMS")
+
+  let policyBatch ← computeTyped context (mkRequest "proof.evaluateBatch" (Json.mkObj [
+    ("goal", toJson "(2 : ℕ) + 2 = 4"),
+    ("actions", Json.arr #[
+      Json.mkObj [("id", toJson "forbidden"), ("tactic", toJson "native_decide")],
+      Json.mkObj [("id", toJson "trusted"), ("tactic", toJson "decide")]])]))
+  check suite "policy-invalid proofs are rejected explicitly"
+    ((actionResult? policyBatch "forbidden" >>= fun value => fieldString? value "outcome")
+      == some "policyRejected")
+  check suite "policy rejection does not block a trusted sibling"
+    ((actionResult? policyBatch "trusted" >>= fun value => fieldString? value "outcome")
+      == some "complete")
+
+  let some advance := actionResult? batch "advance"
+    | check suite "accepted actions return inspectable states" false
+  let some stateId := (advance.getObjVal? "stateId" >>= Json.getNat?).toOption
+    | check suite "accepted actions return numeric state ids" false
+  let inspected ← computeTyped context (mkRequest "proof.inspectState"
+    (Json.mkObj [("stateId", toJson stateId)]))
+  check suite "stored proof states can be inspected"
+    ((inspected.getObjValAs? Bool "ok").toOption == some true)
 
 end Frontier.Test
