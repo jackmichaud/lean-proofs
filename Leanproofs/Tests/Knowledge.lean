@@ -10,8 +10,8 @@ import Leanproofs.Tests.Support
 /-!
 # Normalized knowledge model tests
 
-The canonical graph and its temporary audit projection are tested together so information
-cannot silently disappear at the boundary.
+The canonical graph and its joined runtime view are tested together so information cannot
+silently disappear across normalized-record lookups.
 -/
 
 open Lean Frontier
@@ -68,31 +68,34 @@ def testKnowledgeModel (suite : Suite) : IO Unit := do
     }]
   }
   check suite "canonical fixture is structurally valid" registry.validationErrors.isEmpty
-  let projected := registry.toEntries
-  check suite "canonical claim projects exactly one audit entry" (projected.size == 1)
-  match projected[0]? with
-  | none => check suite "canonical projection contains its claim" false
+  let entries := registry.entries
+  check suite "canonical registry joins exactly one runtime entry" (entries.size == 1)
+  match entries[0]? with
+  | none => check suite "canonical runtime view contains its claim" false
   | some entry =>
-      check suite "projection preserves claim metadata"
+      check suite "runtime view retains claim metadata"
         (entry.id == "normalized-fixture" && entry.title == "Normalized fixture" &&
-          entry.authors == #["Test Author"] && entry.source? == some "curatorial-note")
-      check suite "projection preserves formalization state"
+          entry.claim.authors == #["Test Author"] &&
+          entry.claim.source? == some "curatorial-note")
+      check suite "runtime view retains formalization state"
         (entry.status == .disproved && entry.statement == `FermatFromScratch.pow_card &&
-          entry.baseTheory? == some "A base theory" && entry.tooling == #["Test Tool"])
-      check suite "projection preserves certificate semantics"
-        (entry.certificate? == some `FermatFromScratch.pow_card &&
-          entry.evidence? == some .counterexample)
-      check suite "projection preserves literature and sanity records"
+          entry.baseTheory? == some "A base theory" &&
+          entry.formalization.tooling == #["Test Tool"])
+      check suite "runtime view retains certificate semantics"
+        (entry.certificate?.map (·.declaration) == some `FermatFromScratch.pow_card &&
+          entry.certificate?.map (·.method) == some .counterexample)
+      check suite "runtime view retains literature and sanity records"
         (entry.literature == .folklore && entry.citation? == some "A traditional source." &&
-          entry.sanityChecks == #[`FermatFromScratch.pow_card])
+          entry.sanityChecks.map (·.declaration) == #[`FermatFromScratch.pow_card])
   check suite "committed normalized catalog is structurally valid"
     knowledgeCatalog.validationErrors.isEmpty
-  check suite "legacy audit catalog is only a complete projection"
-    (catalog.size == knowledgeCatalog.claims.size &&
-      catalog.map (·.id) == knowledgeCatalog.claims.map (·.id.value))
+  check suite "runtime view covers every canonical claim"
+    (knowledgeCatalog.entries.size == knowledgeCatalog.claims.size &&
+      knowledgeCatalog.entries.map (·.id) == knowledgeCatalog.claims.map (·.id.value))
   check suite "open formalizations remain distinct from settled literature"
-    ((catalog.find? (·.id == "catalan-conjecture") |>.map fun entry =>
-      entry.status == .open && entry.literature == .proved && entry.certificate?.isNone).getD false)
+    ((knowledgeCatalog.findClaim? "catalan-conjecture" |>.map fun entry =>
+      entry.status == .open && entry.literature == .affirmed &&
+        entry.certificate?.isNone).getD false)
   let malformed := { registry with formalizations := #[] }
   check suite "validation rejects claims without a primary formalization"
     (malformed.validationErrors.any (·.contains "primary formalizations"))

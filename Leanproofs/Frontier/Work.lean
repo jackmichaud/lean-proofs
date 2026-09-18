@@ -11,16 +11,7 @@ open Lean
 namespace Frontier.CLI
 
 private def workEnvironment (context : Context) : Research.EnvironmentFingerprint :=
-  let catalogSignature := "|".intercalate
-    (context.catalog.map (fun entry => s!"{entry.id}:{entry.statement}")).toList
-  {
-    leanVersion := Lean.versionString
-    mathlibRevision := "unknown-runtime-mathlib-revision"
-    frontierRevision := "unknown-working-tree-revision"
-    importsHash := s!"not-content-addressed:catalog-count={context.catalog.size};catalog-signature={hash catalogSignature}"
-    policyVersion := "allow=" ++ ",".intercalate (allowedAxioms.map Name.toString).toList ++
-      ";deny=" ++ ",".intercalate (deniedAxioms.map (fun value => value.1.toString)).toList
-  }
+  context.fingerprint.environment
 
 private def workActor : Research.Actor := {
   kind := .tool

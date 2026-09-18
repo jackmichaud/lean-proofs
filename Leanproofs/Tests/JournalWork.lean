@@ -56,10 +56,10 @@ def testJournalStorage (suite : Suite) (context : Context) : IO Unit :=
         check suite "created stream validates" (events.size == 1)
         check suite "first event creates attempt"
           (match events[0]!.payload with | .attemptCreated _ => true | _ => false)
-        check suite "revision provenance is honest"
-          (events[0]!.environment.frontierRevision == "unknown-working-tree-revision")
-        check suite "environment is not presented as content addressed"
-          (containsSubstring events[0]!.environment.importsHash "not-content-addressed")
+        check suite "research events use the session fingerprint"
+          (events[0]!.environment == context.fingerprint.environment)
+        check suite "policy provenance is content-derived"
+          (events[0]!.environment.policyVersion.startsWith "sha256:")
     let publishPath : System.FilePath := "build" / "test-work.json"
     let count ← Journal.publish context.workRoot publishPath
     check suite "publish materializes streams" (count == 1)

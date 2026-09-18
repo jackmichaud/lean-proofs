@@ -138,8 +138,9 @@ session.
 Research operations are attempt-scoped. `research.attempt.create` creates the append-only stream
 and may open an initial Lean proposition; `premises.retrieve` records its ranked candidates, and
 `proof.evaluateBatch` records every proposed tactic and verifier outcome against a state owned by
-that attempt. This makes branching and failed approaches durable research data without treating
-them as mathematical evidence.
+that attempt. `research.attempt.list` and `research.attempt.get` let a later session discover and
+reconstruct that work. This makes branching and failed approaches durable research data without
+treating them as mathematical evidence.
 
 The premise corpus is prepared once per session — every imported theorem reduced to sorted
 constant arrays and an IDF mass — on the first `suggest`. That call pays for the whole corpus;
@@ -168,9 +169,12 @@ decides.
 
 - `Leanproofs/Library.lean`: imports mathlib in full. Proves nothing; it is what makes the
   premise corpus and the set of modules a draft may use the whole library rather than a slice.
-- `Leanproofs/Registry.lean`: statuses, literature states, evidence kinds, registry records.
-- `Leanproofs/Catalog.lean`: durable, version-controlled theorem catalog.
-- `Leanproofs/CLI.lean`: environment audit, draft checking, discovery, graph, and JSON export.
+- `Leanproofs/Knowledge/Model.lean`: normalized claims, formalizations, certificates, citations,
+  sanity checks, and semantic relations.
+- `Leanproofs/Registry.lean`: joined read views over the normalized knowledge graph.
+- `Leanproofs/Catalog.lean`: durable, version-controlled normalized theorem catalog.
+- `Leanproofs/Frontier/`: audit, proof interaction, retrieval, typed API, and environment identity.
+- `Leanproofs/CLI.lean`: thin public facade over the Frontier modules.
 - `Leanproofs/Journal.lean`: the work journal. Untrusted, durable, never part of an audit.
 - `Leanproofs/Main.lean`: the executable. Thin, and its import list is load-bearing — see the
   module docstring for why the catalog is read out of the environment rather than linked.

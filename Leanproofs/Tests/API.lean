@@ -86,7 +86,7 @@ def testAPI (suite : Suite) (context : Context) : IO Unit := do
     ((capabilities.getObjValAs? Bool "ok").toOption == some true)
   check suite "capabilities describe operation contracts"
     ((result? capabilities >>= fun result =>
-      (result.getObjVal? "contracts" >>= Json.getArr?).toOption).any (·.size == 7))
+      (result.getObjVal? "contracts" >>= Json.getArr?).toOption).any (·.size == 9))
 
   let unsupported := { request with operation := "cli.execute" }
   let unsupportedResponse ← computeTyped context unsupported
@@ -130,6 +130,16 @@ def testAPI (suite : Suite) (context : Context) : IO Unit := do
     | check suite "attempt creation returns an initial proof state" false
   let some initialStateId := (initialProof.getObjVal? "stateId" >>= Json.getNat?).toOption
     | check suite "initial proof state has a numeric id" false
+
+  let attempts ← computeTyped context (mkRequest "research.attempt.list" (Json.mkObj []))
+  check suite "typed clients can list durable attempts"
+    ((result? attempts >>= fun result =>
+      (result.getObjVal? "attempts" >>= Json.getArr?).toOption).any (·.size == 1))
+  let attempt ← computeTyped context
+    (mkRequest "research.attempt.get" (Json.mkObj []) "get-1" (some attemptId))
+  check suite "typed clients can resume from complete attempt history"
+    ((result? attempt >>= fun result =>
+      (result.getObjVal? "events" >>= Json.getArr?).toOption).any (·.size == 1))
 
   let premises ← computeTyped context (mkRequest "premises.retrieve"
     (Json.mkObj [("goal", toJson "∀ n : ℕ, n + 0 = n"),

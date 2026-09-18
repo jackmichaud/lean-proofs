@@ -47,7 +47,8 @@ def RunId.parse (value : String) : Except String RunId :=
 def EventId.parse (value : String) : Except String EventId :=
   return ⟨← validateIdValue "event id" value⟩
 
-/-- Identity of the exact environment in which an observation was made. -/
+/-- Identity of the exact environment in which an observation was made. Each event carries its
+own identity so a durable attempt can honestly span repository revisions. -/
 structure EnvironmentFingerprint where
   leanVersion : String
   mathlibRevision : String

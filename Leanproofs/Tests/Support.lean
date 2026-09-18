@@ -42,27 +42,48 @@ def expectValid (suite : Suite) (name : String) (audit : Audit) : IO Unit :=
 
 /-! ## Fixtures
 
-`baseEntry` is deliberately *valid*. Every negative fixture below is that entry with exactly
-one field broken, so a failing assertion names the check that stopped working rather than
+`baseRegistry` is deliberately *valid*. Every negative fixture below changes one normalized
+record, so a failing assertion names the check that stopped working rather than
 leaving the cause to be guessed at. -/
 
-def baseEntry : Entry := {
-  id := "fixture"
-  title := "Fixture"
-  summary := "A valid fixture entry."
-  status := .proved
-  literature := .proved
-  citation? := some "Fixture citation."
-  topic := "number-theory"
-  statement := `FermatFromScratch.pow_card
-  certificate? := some `FermatFromScratch.pow_card
-  evidence? := some .proof
-  authors := #["Test Author"]
-  created := "2026-01-01"
-  updated := "2026-01-01"
+open Knowledge
+
+def baseClaim : Claim := {
+  id := ⟨"fixture"⟩, title := "Fixture", summary := "A valid fixture entry."
+  topic := "number-theory", authors := #["Test Author"]
+  created := "2026-01-01", updated := "2026-01-01"
 }
 
-def audit (context : Context) (entry : Entry) : IO Audit := do
+def baseFormalization : Formalization := {
+  id := ⟨"fixture:formalization:primary"⟩, claimId := baseClaim.id
+  statement := `FermatFromScratch.pow_card, status := .proved
+  authors := #["Test Author"]
+}
+
+def baseCertificate : Certificate := {
+  id := ⟨"fixture:certificate"⟩, formalizationId := baseFormalization.id
+  declaration := `FermatFromScratch.pow_card, conclusion := .affirms
+  method := .directProof, authors := #["Test Author"]
+}
+
+def baseCitation : Citation := { id := ⟨"fixture:citation"⟩, display := "Fixture citation." }
+
+def baseLiterature : LiteratureAssertion := {
+  id := ⟨"fixture:literature"⟩, claimId := baseClaim.id, conclusion := .affirmed
+  citations := #[baseCitation.id], observed := "2026-01-01"
+}
+
+def baseRegistry : Registry := {
+  claims := #[baseClaim]
+  formalizations := #[baseFormalization]
+  certificates := #[baseCertificate]
+  citations := #[baseCitation]
+  literatureAssertions := #[baseLiterature]
+}
+
+def baseEntry : RegisteredClaim := baseRegistry.entries[0]!
+
+def audit (context : Context) (entry : RegisteredClaim) : IO Audit := do
   let (result, _) ← (auditEntry context entry).run {}
   return result
 
@@ -77,4 +98,3 @@ def withDraft {α : Type} (contents : String) (action : System.FilePath → IO �
   try action path finally IO.FS.removeFile path
 
 end Frontier.Test
-

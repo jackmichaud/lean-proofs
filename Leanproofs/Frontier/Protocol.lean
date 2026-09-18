@@ -30,7 +30,8 @@ def exportTo (context : Context) (path : System.FilePath) : IO Payload := do
 Excludes the entry's own declarations *and* every entry that transitively depends on it: those
 are the candidates guaranteed to be useless, since building the goal's proof on them would be
 circular. -/
-def suggestForEntry (context : Context) (entry : Entry) (limit : Nat) : IO Payload := do
+def suggestForEntry (context : Context) (entry : Knowledge.RegisteredClaim)
+    (limit : Nat) : IO Payload := do
   let some statementInfo := context.find? entry.statement
     | return .failure s!"statement declaration '{entry.statement}' does not exist"
   -- The denoted proposition, not the declaration type: for a `def _ : Prop` the type is just
@@ -413,6 +414,33 @@ def computeTyped (context : Context) (request : API.Request) : IO Json := do
                 ("initialProofState", match initialStep? with
                   | some step => proofStepJson step
                   | none => .null)])
+      | "research.attempt.list" =>
+          if let .error error := API.emptyParams request then
+            return requestFailure context request error
+          match ← Research.listSummaries context.workRoot with
+          | .error message => return researchFailure context request message
+          | .ok summaries =>
+              let items := summaries.map fun summary =>
+                Journal.itemJson (Journal.itemOfSummary summary)
+              return API.successResponse context request (Json.mkObj [
+                ("trusted", toJson false),
+                ("attempts", Json.arr items)])
+      | "research.attempt.get" =>
+          if let .error error := API.emptyParams request then
+            return requestFailure context request error
+          let attemptId ← match API.requireAttemptId request with
+            | .ok value => pure value
+            | .error error => return requestFailure context request error
+          let events ← match ← loadAttemptEvents context request attemptId with
+            | .ok value => pure value
+            | .error response => return response
+          let summary ← match Research.materialize attemptId events with
+            | .ok value => pure value
+            | .error message => return researchFailure context request message
+          return API.successResponse context request (Json.mkObj [
+            ("trusted", toJson false),
+            ("summary", Journal.itemJson (Journal.itemOfSummary summary)),
+            ("events", Json.arr (events.map Research.eventJson))])
       | "declarations.search" =>
           match API.searchParams request with
           | .error error => return requestFailure context request error

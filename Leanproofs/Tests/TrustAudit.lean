@@ -58,126 +58,156 @@ def testMetadataPredicates (suite : Suite) : IO Unit := do
   check suite "a slash-separated date is rejected" (!isIsoDate "2026/08/31")
   check suite "an empty date is rejected" (!isIsoDate "")
   check suite "duplicate ids are reported"
-    ((duplicateIdErrors #[baseEntry, baseEntry]).size == 1)
+    (!({ baseRegistry with claims := #[baseClaim, baseClaim] }).validationErrors.isEmpty)
+  let otherClaim := { baseClaim with id := ⟨"other"⟩ }
+  let otherFormalization := {
+    baseFormalization with id := ⟨"other:formalization:primary"⟩, claimId := otherClaim.id }
+  let distinct := { baseRegistry with
+    claims := #[baseClaim, otherClaim]
+    formalizations := #[baseFormalization, otherFormalization] }
   check suite "distinct ids are accepted"
-    (duplicateIdErrors #[baseEntry, { baseEntry with id := "other" }]).isEmpty
+    (!(distinct.validationErrors.any (·.contains "duplicate claim id")))
 
 /-! ## Entry audit -/
 
 def testEntryAudit (suite : Suite) (context : Context) : IO Unit := do
+  let missingStatement := { baseFormalization with statement := `No.Such.Declaration }
+  let nonProposition := { baseFormalization with statement := `Nat.succ }
+  let catalanStatement := { baseFormalization with statement := `Catalan.conjecture }
+  let justOpenFormalization := { baseFormalization with status := .open }
+  let openFormalization := {
+    baseFormalization with status := .open, statement := `Catalan.conjecture }
+  let relativeFormalization := { baseFormalization with status := .undecidable }
+  let relativeFormalizationWithBase := { relativeFormalization with
+    baseTheory? := some { description := "Peano arithmetic" } }
+  let missingCertificate := { baseCertificate with declaration := `No.Such.Declaration }
+  let nonTheoremCertificate := { baseCertificate with declaration := `Catalan.conjecture }
+  let counterexampleCertificate := { baseCertificate with method := .counterexample }
+  let metatheoremCertificate := { baseCertificate with method := .metatheorem }
+  let validSanity : Knowledge.SanityCheck := {
+    id := ⟨"fixture:sanity"⟩, formalizationId := baseFormalization.id
+    declaration := `Catalan.exceptional_solution, role := .workedExample }
+  let missingSanity := { validSanity with declaration := `No.Such.Check }
+  let nonTheoremSanity := { validSanity with declaration := `Catalan.conjecture }
+  let catalanEntry := { baseEntry with formalization := catalanStatement }
+  let nonTheoremEntry := { catalanEntry with certificate? := some nonTheoremCertificate }
+  let openEntry := { baseEntry with formalization := openFormalization }
+  let openEntry := { openEntry with certificate? := none }
+  let openEntry := { openEntry with sanityChecks := #[] }
+  let unresolvedLiterature := { baseLiterature with conclusion := .unresolved, citations := #[] }
+  let folkloreLiterature := { baseLiterature with conclusion := .folklore, citations := #[] }
+  let refutedLiterature := { baseLiterature with conclusion := .refuted }
+  let unresolvedEntry := { baseEntry with literature? := some unresolvedLiterature }
+  let unresolvedEntry := { unresolvedEntry with citations := #[] }
+  let folkloreEntry := { baseEntry with literature? := some folkloreLiterature }
+  let folkloreEntry := { folkloreEntry with citations := #[] }
+  let malformedCreated := { baseClaim with created := "2026-13-01" }
+  let malformedUpdated := { baseClaim with updated := "31/08/2026" }
+  let authorless := { baseClaim with authors := #[] }
+  let blankTitle := { baseClaim with title := "  " }
+  let blankId := { baseClaim with id := ⟨""⟩ }
   -- Positive control. If this fails, every negative result below is meaningless.
   expectValid suite "the base fixture is valid" (← audit context baseEntry)
 
   expectError suite "a missing statement declaration is reported"
-    (← audit context { baseEntry with statement := `No.Such.Declaration }) "does not exist"
+    (← audit context { baseEntry with formalization := missingStatement }) "does not exist"
 
   expectError suite "a missing certificate declaration is reported"
-    (← audit context { baseEntry with certificate? := some `No.Such.Declaration })
+    (← audit context { baseEntry with certificate? := some missingCertificate })
     "does not exist"
 
   -- A statement that is not a proposition cannot be evidence for anything.
   expectError suite "a non-proposition statement is reported"
-    (← audit context { baseEntry with statement := `Nat.succ }) "does not denote a proposition"
+    (← audit context { baseEntry with formalization := nonProposition }) "does not denote a proposition"
 
   -- The certificate must actually prove the registered claim, not merely exist.
   expectError suite "a certificate that does not prove the statement is reported"
-    (← audit context { baseEntry with statement := `Catalan.conjecture })
+    (← audit context { baseEntry with formalization := catalanStatement })
     "does not match"
 
   -- `Catalan.conjecture` is a `def _ : Prop`, not a theorem, so it cannot certify anything.
   expectError suite "a certificate that is not a theorem is reported"
-    (← audit context
-      { baseEntry with statement := `Catalan.conjecture
-                       certificate? := some `Catalan.conjecture })
+    (← audit context nonTheoremEntry)
     "is not a Lean theorem"
 
   expectError suite "a closed status without a certificate is reported"
-    (← audit context { baseEntry with certificate? := none, evidence? := none })
-    "requires a certificate"
-
-  expectError suite "an open status with a certificate is reported"
-    (← audit context { baseEntry with status := .open })
-    "cannot have a closing certificate"
-
-  expectError suite "an evidence kind without a certificate is reported"
     (← audit context { baseEntry with certificate? := none })
     "requires a certificate"
 
-  expectError suite "a certificate without an evidence kind is reported"
-    (← audit context { baseEntry with evidence? := none })
-    "requires an evidence kind"
+  expectError suite "an open status with a certificate is reported"
+    (← audit context { baseEntry with formalization := justOpenFormalization })
+    "cannot have a closing certificate"
 
   expectError suite "evidence incompatible with the status is reported"
-    (← audit context { baseEntry with evidence? := some .counterexample })
+    (← audit context { baseEntry with certificate? := some counterexampleCertificate })
     "is incompatible with status"
 
   -- An unresolved entry has no certificate whose type-checking would catch a
   -- mis-formalization, so a sanity check is the only defence and is mandatory.
   expectError suite "an unresolved entry without sanity checks is reported"
-    (← audit context
-      { baseEntry with status := .open, certificate? := none, evidence? := none
-                       statement := `Catalan.conjecture })
+    (← audit context openEntry)
     "at least one sanity check"
 
   check suite "an unresolved entry with a sanity check passes that check"
-    (!((← audit context
-        { baseEntry with status := .open, certificate? := none, evidence? := none
-                         statement := `Catalan.conjecture
-                         sanityChecks := #[`Catalan.exceptional_solution] }).errors.any
+    (!((← audit context { openEntry with sanityChecks := #[validSanity] }).errors.any
       (containsSubstring · "at least one sanity check")))
 
   expectError suite "a missing sanity-check declaration is reported"
-    (← audit context { baseEntry with sanityChecks := #[`No.Such.Check] }) "does not exist"
+    (← audit context { baseEntry with sanityChecks := #[missingSanity] }) "does not exist"
 
   expectError suite "a sanity check that is not a theorem is reported"
-    (← audit context { baseEntry with sanityChecks := #[`Catalan.conjecture] })
+    (← audit context { baseEntry with sanityChecks := #[nonTheoremSanity] })
     "is not a Lean theorem"
 
   -- `undecidable` and `independent` are relative claims; without a named theory they are not
   -- claims at all.
   expectError suite "a relative status without a base theory is reported"
-    (← audit context { baseEntry with status := .undecidable, evidence? := some .metatheorem })
+    (← audit context { baseEntry with
+      formalization := relativeFormalization,
+      certificate? := some metatheoremCertificate })
     "must name the formalized base theory"
 
   check suite "a relative status with a base theory passes that check"
     (!((← audit context
-        { baseEntry with status := .undecidable, evidence? := some .metatheorem
-                         baseTheory? := some "Peano arithmetic" }).errors.any
+        { baseEntry with
+          formalization := relativeFormalizationWithBase,
+          certificate? := some metatheoremCertificate }).errors.any
       (containsSubstring · "must name the formalized base theory")))
 
   expectError suite "a literature claim without a citation is reported"
-    (← audit context { baseEntry with citation? := none }) "requires a citation"
+    (← audit context { baseEntry with citations := #[] }) "requires a citation"
 
   expectError suite "a blank citation is reported"
-    (← audit context { baseEntry with citation? := some "   " }) "requires a citation"
+    (← audit context { baseEntry with citations := #[{ baseCitation with display := "   " }] })
+    "requires a citation"
 
   check suite "an unresolved literature state needs no citation"
-    (!((← audit context
-        { baseEntry with literature := .unresolved, citation? := none }).errors.any
+    (!((← audit context unresolvedEntry).errors.any
       (containsSubstring · "requires a citation")))
 
   expectError suite "folklore without a citation is reported"
-    (← audit context { baseEntry with literature := .folklore, citation? := none })
+    (← audit context folkloreEntry)
     "requires a citation"
 
   -- Proved here and refuted in the literature cannot both be true.
   expectError suite "a status/literature contradiction is reported"
-    (← audit context { baseEntry with literature := .disproved }) "while the literature field"
+    (← audit context { baseEntry with literature? := some refutedLiterature })
+    "while the literature field"
 
   expectError suite "a malformed created date is reported"
-    (← audit context { baseEntry with created := "2026-13-01" }) "is not an ISO-8601"
+    (← audit context { baseEntry with claim := malformedCreated }) "is not an ISO-8601"
 
   expectError suite "a malformed updated date is reported"
-    (← audit context { baseEntry with updated := "31/08/2026" }) "is not an ISO-8601"
+    (← audit context { baseEntry with claim := malformedUpdated }) "is not an ISO-8601"
 
   expectError suite "an entry with no author is reported"
-    (← audit context { baseEntry with authors := #[] }) "at least one human author"
+    (← audit context { baseEntry with claim := authorless }) "at least one human author"
 
   expectError suite "a blank title is reported"
-    (← audit context { baseEntry with title := "  " }) "title cannot be empty"
+    (← audit context { baseEntry with claim := blankTitle }) "title cannot be empty"
 
   expectError suite "a blank id is reported"
-    (← audit context { baseEntry with id := "" }) "id cannot be empty"
+    (← audit context { baseEntry with claim := blankId }) "id cannot be empty"
 
   -- Statements are audited, not just certificates: an `open` entry has no certificate whose
   -- type-checking would catch a statement built out of `sorry`. The catalog-side half of this
@@ -190,9 +220,7 @@ def testEntryAudit (suite : Suite) (context : Context) : IO Unit := do
   -- mathematics. The audit has to record the denoted body, or the registry displays every open
   -- problem as the word "Prop".
   let openAudit ← audit context
-    { baseEntry with status := .open, certificate? := none, evidence? := none
-                     statement := `Catalan.conjecture
-                     sanityChecks := #[`Catalan.exceptional_solution] }
+    { openEntry with sanityChecks := #[validSanity] }
   check suite "an open entry records the proposition its statement denotes, not `Prop`"
     (openAudit.statementType != "Prop" && containsSubstring openAudit.statementType "∀")
     s!"got {openAudit.statementType}"
@@ -240,4 +268,3 @@ def testDependencies (suite : Suite) (context : Context) : IO Unit := do
         `Catalan.exceptional_solution)
 
 end Frontier.Test
-

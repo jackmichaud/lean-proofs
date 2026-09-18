@@ -280,11 +280,22 @@ def dependentClosure (audits : Array Audit) (id : String) : Std.HashSet String :
 
 Sanity checks matter here: they share every constant with their statement, so leaving them in
 lets them monopolize the top of a ranking while telling the author nothing. -/
-def registeredDeclarations (catalog : Array Entry) (ids : Std.HashSet String) : NameSet :=
-  catalog.foldl (init := {}) fun names entry =>
-    if ids.contains entry.id then
-      (#[entry.statement] ++ entry.certificate?.toArray ++ entry.sanityChecks).foldl
-        (init := names) NameSet.insert
+def registeredDeclarations (catalog : Knowledge.Registry) (ids : Std.HashSet String) : NameSet :=
+  let formalizationIds := catalog.formalizations.foldl
+      (init := ({} : Std.HashSet Knowledge.FormalizationId)) fun found formalization =>
+    if (catalog.claims.find? (·.id == formalization.claimId)).any
+        (fun claim => ids.contains claim.id.value) then
+      found.insert formalization.id
+    else found
+  let names := catalog.formalizations.foldl (init := {}) fun names formalization =>
+    if formalizationIds.contains formalization.id then names.insert formalization.statement
+    else names
+  let names := catalog.certificates.foldl (init := names) fun names certificate =>
+    if formalizationIds.contains certificate.formalizationId then
+      names.insert certificate.declaration
+    else names
+  catalog.sanityChecks.foldl (init := names) fun names check =>
+    if formalizationIds.contains check.formalizationId then names.insert check.declaration
     else names
 
 end Frontier.CLI

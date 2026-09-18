@@ -32,19 +32,20 @@ def entryJson (audit : Audit) : Json :=
     ("statementType", toJson audit.statementType),
     ("statementAxioms", toJson audit.statementAxioms),
     ("declarationKind", toJson audit.declarationKind),
-    ("certificate", optionStringJson (audit.entry.certificate?.map (·.toString))),
+    ("certificate", optionStringJson (audit.entry.certificate?.map (·.declaration.toString))),
     ("certificateType", optionStringJson audit.certificateType?),
-    ("evidence", optionStringJson (audit.entry.evidence?.map EvidenceKind.toString)),
+    ("evidence", optionStringJson
+      (audit.entry.certificate?.map (·.method.toString))),
     ("baseTheory", optionStringJson audit.entry.baseTheory?),
     ("sanityChecks", Json.arr (audit.sanityChecks.map fun check =>
       Json.mkObj [("name", toJson check.name.toString), ("type", toJson check.type)])),
     ("dependencies", toJson audit.dependencies),
     ("axioms", toJson audit.axioms),
-    ("authors", toJson audit.entry.authors),
-    ("tooling", toJson audit.entry.tooling),
-    ("source", optionStringJson audit.entry.source?),
-    ("created", toJson audit.entry.created),
-    ("updated", toJson audit.entry.updated),
+    ("authors", toJson audit.entry.claim.authors),
+    ("tooling", toJson audit.entry.formalization.tooling),
+    ("source", optionStringJson audit.entry.claim.source?),
+    ("created", toJson audit.entry.claim.created),
+    ("updated", toJson audit.entry.claim.updated),
     ("valid", toJson audit.isValid),
     ("errors", toJson audit.errors)
   ]
@@ -316,9 +317,8 @@ def printEntry (audit : Audit) : IO Unit := do
   IO.println s!"statement:    {audit.entry.statement}"
   IO.println s!"proposition:  {audit.statementType}"
   if let some certificate := audit.entry.certificate? then
-    IO.println s!"certificate:  {certificate}"
-  if let some evidence := audit.entry.evidence? then
-    IO.println s!"evidence:     {evidence.toString}"
+    IO.println s!"certificate:  {certificate.declaration}"
+    IO.println s!"evidence:     {certificate.method.toString}"
   if let some baseTheory := audit.entry.baseTheory? then
     IO.println s!"base theory:  {baseTheory}"
   IO.println s!"tags:         {", ".intercalate audit.entry.tags.toList}"

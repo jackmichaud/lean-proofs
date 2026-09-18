@@ -124,14 +124,14 @@ private def isAttemptCreated : Payload → Bool
   | .attemptCreated _ => true | _ => false
 
 /-- Validate all stream invariants independently of filesystem IO. Besides framing, this checks
-environment pinning, state/retrieval ownership, chronological order, and legal work stages. -/
+state/retrieval ownership, chronological order, and legal work stages. Environment identity is
+recorded per event because one durable attempt may span multiple source revisions. -/
 def validateStream (attemptId : AttemptId) (events : Array Event) : Except String Unit := do
   let _ ← validateIdValue "attempt id" attemptId.value
   let mut eventIds : Std.HashSet EventId := {}
   let mut transitionIds : Std.HashSet TransitionId := {}
   let mut retrievalIds : Std.HashSet RetrievalId := {}
   let mut stateIds : Std.HashSet ProofStateId := {}
-  let mut environment? : Option EnvironmentFingerprint := none
   let mut timestamp? : Option String := none
   let mut stage := Stage.exploring
   let mut promoted := false
@@ -145,9 +145,6 @@ def validateStream (attemptId : AttemptId) (events : Array Event) : Except Strin
       throw s!"event {event.eventId.value} has sequence {event.sequence}, expected {expected}"
     if eventIds.contains event.eventId then throw s!"duplicate event id '{event.eventId.value}'"
     eventIds := eventIds.insert event.eventId
-    match environment? with
-    | none => environment? := some event.environment
-    | some pinned => unless event.environment == pinned do throw "attempt environment changed within one stream"
     if let some previous := timestamp? then
       unless previous <= event.occurredAt do throw s!"event timestamp '{event.occurredAt}' precedes '{previous}'"
     timestamp? := some event.occurredAt

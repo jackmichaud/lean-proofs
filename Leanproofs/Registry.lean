@@ -4,39 +4,18 @@ Released under Apache 2.0 license as described in the file LICENSE.
 Authors: Jack Michaud
 -/
 
-import Lean
+import Leanproofs.Knowledge.Model
 
 /-!
-# Frontier audit projection
+# Frontier registry queries
 
-Compatibility data types shared by the trust audit and the `frontier` CLI. The authoritative
-catalog is `Frontier.Knowledge.Registry`; `Entry` is projected from it at the executable
-boundary until these consumers operate on normalized records directly.
-
-Two independent axes describe every record:
-
-* `Status` is the *Frontier* state: what this repository has formalized and checked.
-* `Literature` is the *mathematical* state: what the research literature already knows.
-
-Keeping them separate is the point of the registry. "Nobody has proved this" and "we have not
-typed this in yet" are opposite conditions, and conflating them makes the research frontier
-unreadable.
+Runtime consumers operate on `Knowledge.Registry` directly. `RegisteredClaim` is a joined view
+over records that remain owned by that normalized registry; it is not a second catalog schema.
 -/
 
-namespace Frontier
+namespace Frontier.Knowledge
 
-/-- Formalization state of a claim *inside this repository*. -/
-inductive Status where
-  | formalizing
-  | open
-  | conditional
-  | proved
-  | disproved
-  | independent
-  | undecidable
-  deriving BEq, DecidableEq, Inhabited, Repr
-
-def Status.toString : Status → String
+def RepositoryStatus.toString : RepositoryStatus → String
   | .formalizing => "formalizing"
   | .open => "open"
   | .conditional => "conditional"
@@ -45,94 +24,90 @@ def Status.toString : Status → String
   | .independent => "independent"
   | .undecidable => "undecidable"
 
-def Status.isClosed : Status → Bool
-  | .conditional | .proved | .disproved | .independent | .undecidable => true
-  | _ => false
-
-/-- Whether the status is a relative metamathematical classification, which is meaningless
-without a named base theory. -/
-def Status.isRelative : Status → Bool
+def RepositoryStatus.isRelative : RepositoryStatus → Bool
   | .independent | .undecidable => true
   | _ => false
 
-/-- State of the claim *in the mathematical literature*, independent of what Frontier has
-formalized. A theorem can be `Literature.proved` and `Status.open` at the same time: that is
-exactly the "known result, not yet formalized here" case. -/
-inductive Literature where
-  /-- No published resolution is known to the maintainers. A genuine research frontier. -/
-  | unresolved
-  /-- Resolved affirmatively in the literature. Requires a citation. -/
-  | proved
-  /-- Refuted in the literature. Requires a citation. -/
-  | disproved
-  /-- Widely known and used but without a canonical citation. Requires a note. -/
-  | folklore
-  deriving BEq, DecidableEq, Inhabited, Repr
-
-def Literature.toString : Literature → String
+def LiteratureConclusion.toString : LiteratureConclusion → String
   | .unresolved => "unresolved"
-  | .proved => "proved"
-  | .disproved => "disproved"
+  | .affirmed => "proved"
+  | .refuted => "disproved"
   | .folklore => "folklore"
 
-/-- Literature states that make a claim about existing mathematics, and therefore must name a
-source. -/
-def Literature.requiresCitation : Literature → Bool
+def LiteratureConclusion.requiresCitation : LiteratureConclusion → Bool
   | .unresolved => false
-  | .proved | .disproved | .folklore => true
+  | .affirmed | .refuted | .folklore => true
 
-/-- The kind of kernel-checked evidence attached to a closed claim. -/
-inductive EvidenceKind where
-  | proof
-  | counterexample
-  | conditionalProof
-  | modelConstruction
-  | reduction
-  | metatheorem
-  deriving BEq, DecidableEq, Inhabited, Repr
-
-def EvidenceKind.toString : EvidenceKind → String
-  | .proof => "proof"
+def CertificateMethod.toString : CertificateMethod → String
+  | .directProof => "proof"
   | .counterexample => "counterexample"
   | .conditionalProof => "conditional-proof"
   | .modelConstruction => "model-construction"
   | .reduction => "reduction"
   | .metatheorem => "metatheorem"
 
-/-- Flattened compatibility view consumed by the current trust audit and CLI. -/
-structure Entry where
-  id : String
-  title : String
-  summary : String
-  /-- What this repository has checked. See `Literature` for what mathematics knows. -/
-  status : Status
-  /-- What the mathematical literature knows, independent of `status`. -/
-  literature : Literature := .unresolved
-  /-- Reference supporting `literature`. Required unless `literature = .unresolved`. -/
-  citation? : Option String := none
-  topic : String
-  tags : Array String := #[]
-  statement : Lean.Name
-  certificate? : Option Lean.Name := none
-  evidence? : Option EvidenceKind := none
-  /-- The explicitly formalized theory or decision problem that an `independent` or
-  `undecidable` classification is relative to. Required for those statuses; those words are
-  never absolute labels. -/
-  baseTheory? : Option String := none
-  /-- Checked lemmas that guard against mis-formalization: witnesses that the hypotheses are
-  satisfiable, worked instances, boundary cases. These are validated but are not research
-  results and are never counted as such. -/
-  sanityChecks : Array Lean.Name := #[]
-  /-- Humans responsible for the claim. -/
-  authors : Array String := #[]
-  /-- Automated tools used to produce the formalization. Tools are not authors. -/
-  tooling : Array String := #[]
-  source? : Option String := none
-  /-- ISO-8601 `YYYY-MM-DD`. -/
-  created : String
-  /-- ISO-8601 `YYYY-MM-DD`. -/
-  updated : String
+/-- The normalized records associated with one claim's primary formalization. -/
+structure RegisteredClaim where
+  claim : Claim
+  formalization : Formalization
+  certificate? : Option Certificate
+  sanityChecks : Array SanityCheck
+  literature? : Option LiteratureAssertion
+  citations : Array Citation
   deriving Inhabited, Repr
+
+def RegisteredClaim.id (entry : RegisteredClaim) : String := entry.claim.id.value
+def RegisteredClaim.title (entry : RegisteredClaim) : String := entry.claim.title
+def RegisteredClaim.summary (entry : RegisteredClaim) : String := entry.claim.summary
+def RegisteredClaim.topic (entry : RegisteredClaim) : String := entry.claim.topic
+def RegisteredClaim.tags (entry : RegisteredClaim) : Array String := entry.claim.tags
+def RegisteredClaim.statement (entry : RegisteredClaim) : Lean.Name := entry.formalization.statement
+def RegisteredClaim.status (entry : RegisteredClaim) : RepositoryStatus := entry.formalization.status
+
+def RegisteredClaim.literature (entry : RegisteredClaim) : LiteratureConclusion :=
+  entry.literature?.map (·.conclusion) |>.getD .unresolved
+
+def RegisteredClaim.citation? (entry : RegisteredClaim) : Option String :=
+  entry.citations[0]?.map (·.display)
+
+def RegisteredClaim.baseTheory? (entry : RegisteredClaim) : Option String :=
+  entry.formalization.baseTheory?.map (·.description)
+
+def Registry.primaryFormalization? (registry : Registry) (claimId : ClaimId) : Option Formalization :=
+  registry.formalizations.find? fun item => item.claimId == claimId && item.role == .primary
+
+def Registry.literatureAssertion? (registry : Registry)
+    (claimId : ClaimId) : Option LiteratureAssertion :=
+  registry.literatureAssertions.find? (·.claimId == claimId)
+
+def Registry.registeredClaim? (registry : Registry) (claim : Claim) : Option RegisteredClaim := do
+  let formalization ← registry.primaryFormalization? claim.id
+  let literature? := registry.literatureAssertion? claim.id
+  let citationIds := literature?.map (·.citations) |>.getD #[]
+  return {
+    claim
+    formalization
+    certificate? := registry.certificates.find? (·.formalizationId == formalization.id)
+    sanityChecks := registry.sanityChecks.filter (·.formalizationId == formalization.id)
+    literature?
+    citations := citationIds.filterMap fun id => registry.citations.find? (·.id == id)
+  }
+
+def Registry.entries (registry : Registry) : Array RegisteredClaim :=
+  registry.claims.filterMap registry.registeredClaim?
+
+def Registry.findClaim? (registry : Registry) (id : String) : Option RegisteredClaim := do
+  let claim ← registry.claims.find? (·.id.value == id)
+  registry.registeredClaim? claim
+
+/- These collection-shaped helpers keep generic runtime code concise while iteration remains a
+view over the normalized records. -/
+def Registry.map (registry : Registry) (f : RegisteredClaim → α) : Array α :=
+  registry.entries.map f
+
+def Registry.toList (registry : Registry) : List RegisteredClaim := registry.entries.toList
+
+def Registry.size (registry : Registry) : Nat := registry.claims.size
 
 /-- Whether `value` is an ISO-8601 calendar date, `YYYY-MM-DD`. -/
 def isIsoDate (value : String) : Bool := Id.run do
@@ -149,5 +124,11 @@ def isIsoDate (value : String) : Bool := Id.run do
   let month := number 5 2
   let day := number 8 2
   return 1 ≤ month && month ≤ 12 && 1 ≤ day && day ≤ 31
+
+end Frontier.Knowledge
+
+namespace Frontier
+
+abbrev isIsoDate := Knowledge.isIsoDate
 
 end Frontier

@@ -19,6 +19,29 @@ formal Lean proposition ---> mathlib/catalog retrieval ---> proof or counterexam
                      catalog JSON + research workspace
 ```
 
+## Knowledge model
+
+The authoritative catalog is a normalized graph, not a single overloaded result record. An
+informal `Claim` may have formalizations, kernel certificates, sanity checks, literature
+assertions and citations, and curated semantic relations. Runtime audit, retrieval, export, and
+the CLI consume this graph directly. Joined `RegisteredClaim` values are read views, not a second
+storage schema.
+
+This distinction matters for research: what mathematicians claim, how a proposition is encoded,
+what Lean has certified, and what the literature reports are related facts with different owners
+and trust levels. Keeping separate identities lets Frontier add alternate formalizations or
+updated literature reviews without rewriting the claim itself.
+
+## Environment identity
+
+Every agent session derives one SHA-256 environment identifier from the Lean version, imported
+module manifest, normalized catalog, axiom policy, and exact source revisions. Responses can be
+pinned to that identifier, and each research event retains the component fingerprint of the
+session that produced it. An attempt may span environment revisions; its event history preserves
+those boundaries instead of pretending it ran in one immutable process. A clean Git revision
+supports a content-addressed claim; dirty or unavailable source is labeled explicitly as
+non-content-addressed rather than being presented as reproducible.
+
 ## Trust boundary
 
 The trusted result is a compiled Lean declaration and its transitive assumptions. `frontier
@@ -57,7 +80,7 @@ Denied, each for a specific reason:
 Anything else is a validation *error*, not a note. This has to be enforced now rather than
 later: the roadmap accepts Lean from automated agents, and an unnoticed `native_decide` is a
 soundness hole that an agent optimizing for "make the build pass" will find. Widening the
-allowlist is a deliberate, reviewable edit to `Leanproofs/CLI.lean`.
+allowlist is a deliberate, reviewable edit to `Leanproofs/Frontier/Core.lean`.
 
 Statements are audited too, not only certificates. A statement is usually a `def _ : Prop`
 that no certificate points at, so auditing only certificates would let an `open` entry built

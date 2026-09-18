@@ -220,13 +220,8 @@ def requestMetadata (source : String) : Option String × Option String :=
         (json.getObjVal? key >>= Json.getStr?).toOption
       (field? "requestId", field? "operation")
 
-/-- Identifies the loaded logical environment for request pinning. The catalog signature is a
-local compatibility identifier, not a cryptographic snapshot fingerprint; a future snapshot
-service can replace it in the next API version. -/
 def environmentId (context : CLI.Context) : String :=
-  let signature := "|".intercalate <| context.catalog.toList.map fun entry =>
-    s!"{entry.id}:{entry.statement}:{entry.certificate?.map Name.toString |>.getD "-"}"
-  s!"frontier-local:lean-{Lean.versionString}:catalog-{hash signature}"
+  context.fingerprint.identifier
 
 def errorJson (error : Error) : Json :=
   Json.mkObj [
@@ -262,8 +257,8 @@ def capabilitiesJson : Json :=
   Json.mkObj [
     ("apiVersions", toJson #[version]),
     ("operations", toJson #["capabilities.get", "environment.describe",
-      "research.attempt.create", "declarations.search", "premises.retrieve", "proof.evaluateBatch",
-      "proof.inspectState"]),
+      "research.attempt.create", "research.attempt.list", "research.attempt.get",
+      "declarations.search", "premises.retrieve", "proof.evaluateBatch", "proof.inspectState"]),
     ("envelope", Json.mkObj [
       ("required", toJson #["apiVersion", "requestId", "operation", "params", "provenance"]),
       ("optional", toJson #["environment", "attemptId"]),
@@ -280,6 +275,14 @@ def capabilitiesJson : Json :=
         ("attempt", toJson "required-new"), ("effect", toJson "append"),
         ("requiredParams", toJson #["title", "goal"]),
         ("optionalParams", toJson #["proposition", "note", "parentAttemptId"])],
+      Json.mkObj [("operation", toJson "research.attempt.list"),
+        ("attempt", toJson "none"), ("effect", toJson "read"),
+        ("requiredParams", toJson (#[] : Array String)),
+        ("optionalParams", toJson (#[] : Array String))],
+      Json.mkObj [("operation", toJson "research.attempt.get"),
+        ("attempt", toJson "required"), ("effect", toJson "read"),
+        ("requiredParams", toJson (#[] : Array String)),
+        ("optionalParams", toJson (#[] : Array String))],
       Json.mkObj [("operation", toJson "declarations.search"), ("attempt", toJson "none"),
         ("effect", toJson "read"), ("requiredParams", toJson #["query"]),
         ("optionalParams", toJson #["limit", "includeDefinitions"])],
@@ -305,11 +308,19 @@ def capabilitiesJson : Json :=
   ]
 
 def environmentJson (context : CLI.Context) : Json :=
+  let reproducibility := match context.fingerprint.reproducibility with
+    | .contentAddressed => (true, #[])
+    | .nonContentAddressed reasons => (false, reasons)
   Json.mkObj [
     ("identifier", toJson (environmentId context)),
-    ("leanVersion", toJson Lean.versionString),
+    ("leanVersion", toJson context.fingerprint.environment.leanVersion),
+    ("mathlibRevision", toJson context.fingerprint.environment.mathlibRevision),
+    ("frontierRevision", toJson context.fingerprint.environment.frontierRevision),
+    ("importsHash", toJson context.fingerprint.environment.importsHash),
+    ("policyVersion", toJson context.fingerprint.environment.policyVersion),
     ("catalogEntries", toJson context.catalog.size),
-    ("contentAddressed", toJson false)
+    ("contentAddressed", toJson reproducibility.1),
+    ("reproducibilityWarnings", toJson reproducibility.2)
   ]
 
 def validateRequest (context : CLI.Context) (request : Request) : Except Error Unit := do

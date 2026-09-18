@@ -60,8 +60,9 @@ def testResearchEvents (suite : Suite) : IO Unit := do
   check suite "creation must be first" (hasError (validateStream ⟨"attempt_1"⟩ #[{ checked with sequence := 1 }]) "first event")
   check suite "timestamps monotonic" (hasError (validateStream ⟨"attempt_1"⟩ #[created,
     { checked with occurredAt := "2026-09-17T00:00:00Z" }]) "precedes")
-  check suite "environment pinned" (hasError (validateStream ⟨"attempt_1"⟩ #[created,
-    { checked with environment := { env with policyVersion := "other" } }]) "environment changed")
+  let revisedEnvironment := { checked with environment := { env with policyVersion := "other" } }
+  check suite "attempt may span environments"
+    (validateStream ⟨"attempt_1"⟩ #[created, revisedEnvironment] |>.isOk)
   check suite "unknown state rejected" (hasError (validateStream ⟨"attempt_1"⟩ #[created,
     event 2 "event_2" (.actionProposed {
       stateId := ⟨"missing"⟩

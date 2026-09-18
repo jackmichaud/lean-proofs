@@ -7,6 +7,7 @@ Authors: Jack Michaud
 import Lean
 import Leanproofs.Registry
 import Leanproofs.Journal
+import Leanproofs.Frontier.Fingerprint
 
 /-!
 # Frontier CLI
@@ -24,6 +25,8 @@ that module for the full explanation.
 open Lean
 
 namespace Frontier.CLI
+
+open Knowledge
 
 /-! ## Axiom policy
 
@@ -47,6 +50,11 @@ def deniedAxioms : Array (Name × String) := #[
 
 def allowedAxiomSet : NameSet :=
   allowedAxioms.foldl (init := {}) NameSet.insert
+
+def policyFingerprintMaterial : String :=
+  "frontier-axiom-policy/v1\nallow=" ++
+    ",".intercalate (allowedAxioms.map Name.toString).toList ++ "\ndeny=" ++
+    ",".intercalate (deniedAxioms.map (fun value => value.1.toString ++ ":" ++ value.2)).toList
 
 /-- Why `name` is rejected, if it is.
 
@@ -137,7 +145,8 @@ def retainedProofStates : Nat := 256
 index from registered declaration names back to catalog ids. -/
 structure Context where
   env : Environment
-  catalog : Array Entry
+  catalog : Knowledge.Registry
+  fingerprint : Fingerprint.Result
   registered : Std.HashMap Name String
   /-- Memoized premise corpus. Building it folds over the type of every imported theorem,
   which is affordable once and far too expensive to redo for each request in
@@ -157,14 +166,22 @@ structure Context where
   one, because a single request can otherwise degrade every later request. -/
   session : Bool := false
 
-def Context.of (env : Environment) (catalog : Array Entry)
+def Context.of (env : Environment) (catalog : Knowledge.Registry)
     (workRoot : System.FilePath) (workPublish? : Option System.FilePath) : IO Context := do
+  let fingerprint ← Fingerprint.capture env {
+    catalog := Fingerprint.catalogMaterial catalog
+    policy := policyFingerprintMaterial
+  }
   return {
-    env, catalog, workRoot, workPublish?
-    registered := catalog.foldl (init := {}) fun map entry =>
-      let map := map.insert entry.statement entry.id
-      match entry.certificate? with
-      | some certificate => map.insert certificate entry.id
+    env, catalog, fingerprint, workRoot, workPublish?
+    registered := catalog.formalizations.foldl (init := {}) fun map formalization =>
+      match catalog.claims.find? (·.id == formalization.claimId) with
+      | some claim =>
+          let map := map.insert formalization.statement claim.id.value
+          catalog.certificates.foldl (init := map) fun map certificate =>
+            if certificate.formalizationId == formalization.id then
+              map.insert certificate.declaration claim.id.value
+            else map
       | none => map
     premiseIndexRef := ← IO.mkRef none
     -- Ids start at one: `prove --state 0` reads as a mistake, and it is useful for that to be
@@ -173,14 +190,14 @@ def Context.of (env : Environment) (catalog : Array Entry)
 
 /-- The default context: journal at `FRONTIER_WORK_DIR` or `work/`, publishing to the path the
 web workspace fetches. -/
-def Context.default (env : Environment) (catalog : Array Entry) : IO Context := do
+def Context.default (env : Environment) (catalog : Knowledge.Registry) : IO Context := do
   Context.of env catalog (← Journal.defaultRoot) (some Journal.defaultExportPath)
 
 def Context.find? (context : Context) (name : Name) : Option ConstantInfo :=
   context.env.find? name
 
-def Context.entry? (context : Context) (id : String) : Option Entry :=
-  context.catalog.find? (·.id == id)
+def Context.entry? (context : Context) (id : String) : Option Knowledge.RegisteredClaim :=
+  context.catalog.findClaim? id
 
 /-! ## Environment traversal -/
 

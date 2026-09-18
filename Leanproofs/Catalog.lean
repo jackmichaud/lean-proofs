@@ -4,7 +4,7 @@ Released under Apache 2.0 license as described in the file LICENSE.
 Authors: Jack Michaud
 -/
 
-import Leanproofs.Knowledge.LegacyAdapter
+import Leanproofs.Knowledge.Model
 import Leanproofs.Catalan
 import Leanproofs.Fermat
 
@@ -193,11 +193,5 @@ def knowledgeCatalog : Knowledge.Registry := {
   citations := Catalog.citations
   literatureAssertions := Catalog.literatureAssertions
 }
-
-/-- Temporary projection for the existing CLI and trust-audit boundary. -/
-def catalog : Array Entry :=
-  let errors := knowledgeCatalog.validationErrors
-  if errors.isEmpty then knowledgeCatalog.toEntries
-  else panic! s!"invalid normalized knowledge catalog: {"; ".intercalate errors.toList}"
 
 end Frontier

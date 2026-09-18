@@ -50,9 +50,10 @@ printf '%s\n' '{"apiVersion":"frontier.agent/v1","requestId":"req-1","operation"
 
 One versioned JSON request envelope per line in, one correlated JSON response per line out.
 Begin with `capabilities.get`; supported operations include declaration search, premise
-retrieval, independent batch tactic evaluation, and proof-state inspection. Pin later requests
-to the environment id returned by the session. Premise retrieval and proof operations require
-the attempt id and record their inputs and outcomes in that attempt's event stream. Legacy
+retrieval, independent batch tactic evaluation, proof-state inspection, and attempt history
+reads. Pin later requests to the environment id returned by the session. Premise retrieval and
+proof operations require the attempt id and record their inputs and outcomes in that attempt's
+event stream. Use `research.attempt.list` and `research.attempt.get` when resuming work. Legacy
 argument arrays and bare commands are not accepted. `--json` works on any one-shot command too.
 
 ## Things that will trip you up

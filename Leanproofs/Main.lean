@@ -21,7 +21,7 @@ which in turn requires `enableInitializersExecution`.
 Running initializers for a module that is *already statically linked into this binary*
 crashes the process. So the executable must not link the modules it is going to import: it
 links `Lean`, the plain data types in `Leanproofs.Registry`, and the command implementations
-in `Leanproofs.CLI`, then imports `Leanproofs` at runtime and reads `Frontier.catalog` out of
+in `Leanproofs.CLI`, then imports `Leanproofs` at runtime and reads `Frontier.knowledgeCatalog` out of
 the resulting environment as data.
 -/
 
@@ -34,8 +34,8 @@ unsafe def loadEnvironment : IO Environment := do
 
 /-- Read the catalog out of the imported environment. The name cannot be resolved at compile
 time — that is the whole point of the split — so it is spelled with a single backtick. -/
-unsafe def loadCatalog (env : Environment) : IO (Array Frontier.Entry) :=
-  IO.ofExcept <| env.evalConst (Array Frontier.Entry) {} `Frontier.catalog
+unsafe def loadCatalog (env : Environment) : IO Frontier.Knowledge.Registry :=
+  IO.ofExcept <| env.evalConst Frontier.Knowledge.Registry {} `Frontier.knowledgeCatalog
 
 unsafe def main (args : List String) : IO UInt32 := do
   match Frontier.CLI.runWithoutEnvironment? args with

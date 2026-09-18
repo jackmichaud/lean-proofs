@@ -125,7 +125,6 @@ inductive CertificateMethod where
   | modelConstruction
   | reduction
   | metatheorem
-  | legacyUnclassified
   deriving BEq, DecidableEq, Inhabited, Repr
 
 /-- A candidate kernel certificate. Its validity and trust state are derived by audit. -/
@@ -148,8 +147,6 @@ inductive SanityRole where
   | boundedSearch
   | nontriviality
   | correspondence
-  /-- Used by the adapter because legacy entries did not record a role. -/
-  | legacyUnclassified
   deriving BEq, DecidableEq, Inhabited, Repr
 
 structure SanityCheck where

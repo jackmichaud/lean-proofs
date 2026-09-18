@@ -12,12 +12,14 @@ namespace Frontier.CLI
 
 /-! ## Auditing -/
 
-def certificateShapeIsValid (env : Environment) (entry : Entry)
+open Knowledge
+
+def certificateShapeIsValid (env : Environment) (formalization : Formalization)
     (statementInfo certificateInfo : ConstantInfo) : Bool :=
   match statementExpr? statementInfo with
   | none => false
   | some statement =>
-      match entry.status with
+      match formalization.status with
       | .conditional | .proved | .independent | .undecidable =>
           Kernel.isDefEqGuarded env {} certificateInfo.type statement
       | .disproved =>
@@ -25,44 +27,46 @@ def certificateShapeIsValid (env : Environment) (entry : Entry)
           Kernel.isDefEqGuarded env {} certificateInfo.type negated
       | _ => true
 
-def evidenceMatchesStatus (status : Status) (evidence? : Option EvidenceKind) : Bool :=
-  match status, evidence? with
+def evidenceMatchesStatus (status : RepositoryStatus)
+    (method? : Option CertificateMethod) : Bool :=
+  match status, method? with
   | .formalizing, none | .open, none => true
   | .conditional, some .conditionalProof => true
-  | .proved, some .proof => true
+  | .proved, some .directProof => true
   | .disproved, some .counterexample => true
   | .independent, some .modelConstruction | .independent, some .metatheorem => true
   | .undecidable, some .reduction | .undecidable, some .metatheorem => true
   | _, _ => false
 
 /-- A `status`/`literature` pair that cannot both be true. -/
-def literatureContradiction (status : Status) (literature : Literature) : Option String :=
+def literatureContradiction (status : RepositoryStatus)
+    (literature : LiteratureConclusion) : Option String :=
   match status, literature with
-  | .proved, .disproved =>
+  | .proved, .refuted =>
       some "this repository proves the statement while the literature field says it is refuted"
-  | .disproved, .proved =>
+  | .disproved, .affirmed =>
       some "this repository refutes the statement while the literature field says it is proved"
   | _, _ => none
 
-structure SanityCheck where
+structure AuditedSanityCheck where
   name : Name
   type : String
   deriving Inhabited
 
 structure Audit where
-  entry : Entry
+  entry : RegisteredClaim
   statementType : String
   statementAxioms : Array String
   certificateType? : Option String
   declarationKind : String
   dependencies : Array String
   axioms : Array String
-  sanityChecks : Array SanityCheck
+  sanityChecks : Array AuditedSanityCheck
   errors : Array String
 
 def Audit.isValid (audit : Audit) : Bool := audit.errors.isEmpty
 
-def auditEntry (context : Context) (entry : Entry) : StateT ReachCache IO Audit := do
+def auditEntry (context : Context) (entry : RegisteredClaim) : StateT ReachCache IO Audit := do
   let env := context.env
   let mut errors := #[]
   let mut statementType := "<missing>"
@@ -92,12 +96,10 @@ def auditEntry (context : Context) (entry : Entry) : StateT ReachCache IO Audit 
   | none =>
       if entry.status.isClosed then
         errors := errors.push s!"closed status '{entry.status.toString}' requires a certificate"
-      if entry.evidence?.isSome then
-        errors := errors.push "an evidence kind requires a certificate"
   | some certificate =>
-      match context.find? certificate with
+      match context.find? certificate.declaration with
       | none =>
-          errors := errors.push s!"certificate declaration '{certificate}' does not exist"
+          errors := errors.push s!"certificate declaration '{certificate.declaration}' does not exist"
       | some certificateInfo =>
           certificateType? := some (← prettyType env certificateInfo)
           if !entry.status.isClosed then
@@ -105,60 +107,60 @@ def auditEntry (context : Context) (entry : Entry) : StateT ReachCache IO Audit 
               s!"status '{entry.status.toString}' cannot have a closing certificate"
           match certificateInfo with
           | .thmInfo _ => pure ()
-          | _ => errors := errors.push s!"certificate '{certificate}' is not a Lean theorem"
+          | _ => errors := errors.push s!"certificate '{certificate.declaration}' is not a Lean theorem"
           if let some statementInfo := statementInfo? then
-            if !certificateShapeIsValid env entry statementInfo certificateInfo then
+            if !certificateShapeIsValid env entry.formalization statementInfo certificateInfo then
               errors := errors.push
                 s!"certificate type does not match the '{entry.status.toString}' claim"
-          let certificateReach ← reach context certificate
+          let certificateReach ← reach context certificate.declaration
           axiomNames := certificateReach.axiomArray
           dependencies := certificateReach.catalogArray entry.id
-          errors := errors ++ axiomPolicyErrors s!"certificate '{certificate}'" axiomNames
+          errors := errors ++ axiomPolicyErrors s!"certificate '{certificate.declaration}'" axiomNames
   -- Entries with no certificate take their dependencies from the statement.
   if entry.certificate?.isNone && statementInfo?.isSome then
     dependencies := (← reach context entry.statement).catalogArray entry.id
   -- Sanity checks.
-  let mut sanityChecks : Array SanityCheck := #[]
-  for name in entry.sanityChecks do
-    match context.find? name with
-    | none => errors := errors.push s!"sanity check '{name}' does not exist"
+  let mut sanityChecks : Array AuditedSanityCheck := #[]
+  for check in entry.sanityChecks do
+    match context.find? check.declaration with
+    | none => errors := errors.push s!"sanity check '{check.declaration}' does not exist"
     | some info =>
         match info with
         | .thmInfo _ => pure ()
-        | _ => errors := errors.push s!"sanity check '{name}' is not a Lean theorem"
-        let checkReach ← reach context name
-        errors := errors ++ axiomPolicyErrors s!"sanity check '{name}'" checkReach.axiomArray
-        sanityChecks := sanityChecks.push { name, type := (← prettyType env info) }
+        | _ => errors := errors.push s!"sanity check '{check.declaration}' is not a Lean theorem"
+        let checkReach ← reach context check.declaration
+        errors := errors ++ axiomPolicyErrors s!"sanity check '{check.declaration}'" checkReach.axiomArray
+        sanityChecks := sanityChecks.push { name := check.declaration, type := (← prettyType env info) }
   if !entry.status.isClosed && entry.sanityChecks.isEmpty then
     errors := errors.push
       "an unresolved entry needs at least one sanity check; a formal statement nothing has \
        been proved about is exactly where mis-formalization hides (see docs/adding-results.md)"
   -- Metadata.
-  if entry.id.trimAscii.isEmpty then
+  if entry.claim.id.value.trimAscii.isEmpty then
     errors := errors.push "entry id cannot be empty"
-  if entry.title.trimAscii.isEmpty then
+  if entry.claim.title.trimAscii.isEmpty then
     errors := errors.push "entry title cannot be empty"
-  if entry.evidence?.isNone && entry.certificate?.isSome then
-    errors := errors.push "a certificate requires an evidence kind"
-  if !evidenceMatchesStatus entry.status entry.evidence? then
-    let evidence := entry.evidence?.map EvidenceKind.toString |>.getD "none"
+  let method? := entry.certificate?.map (·.method)
+  if !evidenceMatchesStatus entry.status method? then
+    let evidence := method?.map CertificateMethod.toString |>.getD "none"
     errors := errors.push
       s!"evidence '{evidence}' is incompatible with status '{entry.status.toString}'"
   if entry.status.isRelative && (entry.baseTheory?.getD "").trimAscii.isEmpty then
     errors := errors.push
       s!"status '{entry.status.toString}' is relative and must name the formalized base theory \
          or decision problem in `baseTheory?`"
-  if entry.literature.requiresCitation && (entry.citation?.getD "").trimAscii.isEmpty then
+  if entry.literature.requiresCitation &&
+      !entry.citations.any (fun citation => !citation.display.trimAscii.isEmpty) then
     errors := errors.push
       s!"literature state '{entry.literature.toString}' makes a claim about existing \
          mathematics and requires a citation"
   if let some contradiction := literatureContradiction entry.status entry.literature then
     errors := errors.push contradiction
-  if !isIsoDate entry.created then
-    errors := errors.push s!"created '{entry.created}' is not an ISO-8601 YYYY-MM-DD date"
-  if !isIsoDate entry.updated then
-    errors := errors.push s!"updated '{entry.updated}' is not an ISO-8601 YYYY-MM-DD date"
-  if entry.authors.isEmpty then
+  if !isIsoDate entry.claim.created then
+    errors := errors.push s!"created '{entry.claim.created}' is not an ISO-8601 YYYY-MM-DD date"
+  if !isIsoDate entry.claim.updated then
+    errors := errors.push s!"updated '{entry.claim.updated}' is not an ISO-8601 YYYY-MM-DD date"
+  if entry.claim.authors.isEmpty then
     errors := errors.push "every entry needs at least one human author"
   return {
     entry
@@ -172,18 +174,9 @@ def auditEntry (context : Context) (entry : Entry) : StateT ReachCache IO Audit 
     errors
   }
 
-def duplicateIdErrors (catalog : Array Entry) : Array String := Id.run do
-  let mut seen : Std.HashSet String := {}
-  let mut errors := #[]
-  for entry in catalog do
-    if seen.contains entry.id then
-      errors := errors.push s!"duplicate entry id '{entry.id}'"
-    seen := seen.insert entry.id
-  return errors
-
 def auditCatalog (context : Context) : IO (Array Audit × Array String) := do
-  let (audits, _) ← (context.catalog.mapM (auditEntry context)).run {}
-  return (audits, duplicateIdErrors context.catalog)
+  let (audits, _) ← (context.catalog.entries.mapM (auditEntry context)).run {}
+  return (audits, context.catalog.validationErrors)
 
 /-! ## Draft checking
 

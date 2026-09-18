@@ -24,7 +24,8 @@ unsafe def main : IO UInt32 := do
   initSearchPath (← findSysroot)
   enableInitializersExecution
   let env ← importModules #[{ module := `Leanproofs }] {} (loadExts := true)
-  let catalog ← IO.ofExcept <| env.evalConst (Array Frontier.Entry) {} `Frontier.catalog
+  let catalog ← IO.ofExcept <|
+    env.evalConst Frontier.Knowledge.Registry {} `Frontier.knowledgeCatalog
   -- A throwaway journal root, and publishing disabled. The tests mutate the journal, and a
   -- suite that wrote into `work/` would destroy the record it is supposed to be protecting.
   let workRoot : System.FilePath := "build" / "test-work"
