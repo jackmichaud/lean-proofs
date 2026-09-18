@@ -95,7 +95,9 @@ axiom allowlist and the reason each denied axiom is denied.
 `check` is stateless: it tells you whether a file is acceptable and forgets. The journal is
 where the work between "here is a goal" and "here is a catalog entry" lives — one append-only
 JSONL event stream per attempt under `work/`, committed, so its history survives the session
-that produced it.
+that produced it. Readers and writers coordinate through operating-system file locks. A batch is
+validated and assigned IDs while holding its stream lock, then committed by atomic rename, so
+concurrent agents see either the complete previous history or the complete next history.
 
 ```bash
 lake exe frontier work add "Formalize X" --goal 'the proposition' --note 'why it is stuck'

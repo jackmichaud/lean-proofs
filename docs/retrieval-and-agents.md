@@ -179,11 +179,11 @@ is worth stating plainly.
 
 The **work journal** exists today (`Leanproofs/Journal.lean`, `frontier work`). It records what
 an agent working *in this checkout* is already doing: goals, draft paths, stages, and the
-attempt count and latest report from `frontier check --work`. Each check replaces that report;
-append-only attempt and check history is planned. Nothing in the journal is executed. Reading a
-journal file is not running it, and the sandbox requirements above do not apply, because there
-is no untrusted party — the code being checked is the local agent's own, which it could have
-run anyway.
+complete append-only event history from proof search and `frontier check --work`. Per-attempt
+operating-system locks and atomic replacement serialize concurrent agent writers without exposing
+partial batches. Nothing in the journal is executed. Reading a journal file is not running it,
+and the sandbox requirements above do not apply, because there is no untrusted party: the code
+being checked is the local agent's own, which it could have run anyway.
 
 The **submission queue** does not exist and must not be built before the sandbox does. It
 accepts Lean from somewhere else, which means building it, which means arbitrary code

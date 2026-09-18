@@ -5,6 +5,7 @@ Authors: Jack Michaud
 -/
 
 import Leanproofs.Research.Json
+import Std.Time
 
 namespace Frontier.Research
 
@@ -13,6 +14,34 @@ open Lean
 def streamPath (root : System.FilePath) (attemptId : AttemptId) : Except String System.FilePath := do
   let value ← validateIdValue "attempt id" attemptId.value
   return root / s!"{value}.jsonl"
+
+private def lockPath (root : System.FilePath) (attemptId : AttemptId) : Except String System.FilePath := do
+  let value ← validateIdValue "attempt id" attemptId.value
+  return root / s!".{value}.lock"
+
+private def temporaryPath (root : System.FilePath) (attemptId : AttemptId) : Except String System.FilePath := do
+  let value ← validateIdValue "attempt id" attemptId.value
+  return root / s!".{value}.tmp"
+
+/-- Run `action` under an operating-system advisory lock. The lock file is intentionally retained:
+deleting it could let two processes lock different inodes for the same logical resource. -/
+def withFileLock (path : System.FilePath) (exclusive : Bool) (action : IO α) : IO α := do
+  if let some parent := path.parent then IO.FS.createDirAll parent
+  let handle ← IO.FS.Handle.mk path .append
+  handle.lock (exclusive := exclusive)
+  try action finally handle.unlock
+
+private def withStreamLock (root : System.FilePath) (attemptId : AttemptId)
+    (exclusive : Bool) (action : IO α) : IO α := do
+  let path ← match lockPath root attemptId with
+    | .ok value => pure value
+    | .error message => throw <| IO.userError message
+  withFileLock path exclusive action
+
+def timestampNow : IO String := do
+  let timestamp ← Std.Time.Timestamp.now
+  let wallTime := Std.Time.WallTime.ofTimestamp timestamp Std.Time.TimeZone.Offset.zero
+  return (Std.Time.PlainDateTime.ofWallTime wallTime).format "yyyy-MM-dd'T'HH:mm:ss'Z'"
 
 private def parseLine (path : System.FilePath) (lineNumber : Nat) (line : String) : Except String Event := do
   let json ← match Json.parse line with
@@ -214,9 +243,8 @@ def validateStream (attemptId : AttemptId) (events : Array Event) : Except Strin
         stage := .registered
   if pendingAction?.isSome then throw "action.proposed must be followed by action.evaluated"
 
-/-- Read and validate one attempt's JSONL stream. Every physical nonterminal line is an event. -/
-def readEvents (root : System.FilePath) (attemptId : AttemptId) : IO (Except String (Array Event)) := do
-  let path ← match streamPath root attemptId with | .ok path => pure path | .error e => return .error e
+private def readEventsUnlocked (path : System.FilePath) (attemptId : AttemptId) :
+    IO (Except String (Array Event)) := do
   unless ← path.pathExists do return .ok #[]
   let contents ← IO.FS.readFile path
   let lines := if contents.endsWith "\n" then (contents.splitOn "\n").dropLast else contents.splitOn "\n"
@@ -231,18 +259,73 @@ def readEvents (root : System.FilePath) (attemptId : AttemptId) : IO (Except Str
   | .ok _ => return .ok events
   | .error message => return .error s!"{path}: {message}"
 
-/-- Append exactly one event. This is a single-writer API: callers must serialize writers to a
-stream. It validates existing bytes and never edits or deletes an earlier event. -/
-def appendEvent (root : System.FilePath) (attemptId : AttemptId) (event : Event) : IO (Except String Unit) := do
+/-- Read and validate one attempt's JSONL stream under a shared process-safe lock. Every physical
+nonterminal line is an event. -/
+def readEvents (root : System.FilePath) (attemptId : AttemptId) : IO (Except String (Array Event)) := do
   let path ← match streamPath root attemptId with | .ok path => pure path | .error e => return .error e
-  let existing ← match ← readEvents root attemptId with | .ok es => pure es | .error e => return .error e
-  match validateStream attemptId (existing.push event) with | .error e => return .error e | .ok _ => pure ()
-  IO.FS.createDirAll root
-  let handle ← IO.FS.Handle.mk path .append
-  handle.putStr (eventJson event).compress
-  handle.putStr "\n"
-  handle.flush
-  return .ok ()
+  withStreamLock root attemptId false (readEventsUnlocked path attemptId)
+
+private def appendTransaction (root : System.FilePath) (attemptId : AttemptId)
+    (prepare : Array Event → IO (Except String (Array Event))) :
+    IO (Except String (Array Event)) := do
+  let path ← match streamPath root attemptId with | .ok path => pure path | .error e => return .error e
+  withStreamLock root attemptId true do
+    let existing ← match ← readEventsUnlocked path attemptId with
+      | .ok events => pure events
+      | .error message => return .error message
+    let appended ← match ← prepare existing with
+      | .ok events => pure events
+      | .error message => return .error message
+    if appended.isEmpty then return .error "cannot append an empty research event batch"
+    let combined := existing ++ appended
+    match validateStream attemptId combined with
+    | .error message => return .error message
+    | .ok _ => pure ()
+    let temporary ← match temporaryPath root attemptId with
+      | .ok value => pure value
+      | .error message => return .error message
+    let contents := "\n".intercalate (combined.map (eventJson · |>.compress)).toList ++ "\n"
+    -- Replacing a complete same-directory temporary file makes the batch visible atomically.
+    -- If a process dies before the rename, the prior stream remains intact and the next writer
+    -- removes the abandoned temporary file while holding the same lock.
+    try
+      if ← temporary.pathExists then IO.FS.removeFile temporary
+      do
+        let handle ← IO.FS.Handle.mk temporary .write
+        handle.putStr contents
+        handle.flush
+      IO.FS.rename temporary path
+    catch exception =>
+      if ← temporary.pathExists then IO.FS.removeFile temporary
+      throw exception
+    return .ok combined
+
+/-- Allocate and append a payload batch as one process-safe transaction. Sequence numbers,
+event ids, validation, and the single physical write all occur while holding the stream lock. -/
+def appendPayloads (root : System.FilePath) (attemptId : AttemptId)
+    (environment : EnvironmentFingerprint) (actor : Actor) (payloads : Array Payload) :
+    IO (Except String (Array Event)) := do
+  if payloads.isEmpty then return .error "cannot append an empty research event batch"
+  appendTransaction root attemptId fun existing => do
+    let occurredAt ← timestampNow
+    return .ok <| payloads.mapIdx fun index payload =>
+      let sequence := existing.size + index + 1
+      {
+        eventId := ⟨s!"event-{sequence}"⟩
+        attemptId
+        sequence
+        occurredAt
+        environment
+        actor
+        payload
+      }
+
+/-- Append exactly one preconstructed event under the same process-safe transaction used by
+payload batches. This lower-level entry point is primarily useful for storage tests. -/
+def appendEvent (root : System.FilePath) (attemptId : AttemptId) (event : Event) : IO (Except String Unit) := do
+  match ← appendTransaction root attemptId fun _ => pure (.ok #[event]) with
+  | .ok _ => return .ok ()
+  | .error message => return .error message
 
 /-- List and validate every attempt stream. Unrelated files are ignored; malformed `.jsonl`
 stream names or contents fail the listing so authoritative history is never silently omitted. -/

@@ -5,7 +5,6 @@ Authors: Jack Michaud
 -/
 
 import Leanproofs.Research.Events
-import Std.Time
 
 /-!
 # Work journal projection
@@ -36,13 +35,7 @@ def Stage.handSetError? : Stage → Option String
       "`registered` records a promotion event, so it requires `--entry <catalog id>` naming a clean result"
   | _ => none
 
-def utcNow : IO Std.Time.PlainDateTime := do
-  let timestamp ← Std.Time.Timestamp.now
-  return Std.Time.PlainDateTime.ofWallTime
-    (Std.Time.WallTime.ofTimestamp timestamp Std.Time.TimeZone.Offset.zero)
-
-def timestampNow : IO String := do
-  return (← utcNow).format "yyyy-MM-dd'T'HH:mm:ss'Z'"
+def timestampNow : IO String := Research.timestampNow
 
 structure CheckRecord where
   checkedAt : String
@@ -201,8 +194,7 @@ def freshId (root : System.FilePath) (title : String) : IO String := do
   while ← exists? root s!"{base}-{suffix}" do suffix := suffix + 1
   return s!"{base}-{suffix}"
 
-/-- Append a nonempty batch as one validated write and return its materialized work item.
-The caller must serialize concurrent writers to the same stream. -/
+/-- Append a nonempty batch as one process-safe transaction and return its materialized work item. -/
 def appendMany (root : System.FilePath) (id : String)
     (environment : Research.EnvironmentFingerprint) (actor : Research.Actor)
     (payloads : Array Research.Payload) : IO (Except String Item) := do
@@ -210,36 +202,12 @@ def appendMany (root : System.FilePath) (id : String)
   let attempt ← match attemptId id with
     | .ok value => pure value
     | .error message => return .error message
-  let events ← match ← Research.readEvents root attempt with
+  let events ← match ← Research.appendPayloads root attempt environment actor payloads with
     | .ok values => pure values
     | .error message => return .error message
-  let occurredAt ← timestampNow
-  let appended := payloads.mapIdx fun index payload =>
-    let sequence := events.size + index + 1
-    {
-      eventId := ⟨s!"event-{sequence}"⟩
-      attemptId := attempt
-      sequence
-      occurredAt
-      environment
-      actor
-      payload
-    }
-  let combined := events ++ appended
-  match Research.validateStream attempt combined with
-  | .error message => return .error message
-  | .ok _ => pure ()
-  let summary ← match Research.materialize attempt combined with
+  let summary ← match Research.materialize attempt events with
     | .ok value => pure value
     | .error message => return .error message
-  let path ← match Research.streamPath root attempt with
-    | .ok value => pure value
-    | .error message => return .error message
-  IO.FS.createDirAll root
-  let lines := "\n".intercalate (appended.map (Research.eventJson · |>.compress)).toList ++ "\n"
-  let handle ← IO.FS.Handle.mk path .append
-  handle.putStr lines
-  handle.flush
   return .ok (itemOfSummary summary)
 
 /-- Append one validated event and return the newly materialized work item. -/
@@ -264,9 +232,21 @@ def journalJson (items : Array Item) (problems : Array String) (generated : Stri
   ]
 
 def publish (root : System.FilePath) (path : System.FilePath) : IO Nat := do
-  let (items, problems) ← readAll root
-  if let some parent := path.parent then IO.FS.createDirAll parent
-  IO.FS.writeFile path ((journalJson items problems (← timestampNow)).pretty 100 ++ "\n")
-  return items.size
+  let lock : System.FilePath := path.toString ++ ".lock"
+  let temporary : System.FilePath := path.toString ++ ".tmp"
+  Research.withFileLock lock true do
+    let (items, problems) ← readAll root
+    let contents := (journalJson items problems (← timestampNow)).pretty 100 ++ "\n"
+    try
+      if ← temporary.pathExists then IO.FS.removeFile temporary
+      do
+        let handle ← IO.FS.Handle.mk temporary .write
+        handle.putStr contents
+        handle.flush
+      IO.FS.rename temporary path
+    catch exception =>
+      if ← temporary.pathExists then IO.FS.removeFile temporary
+      throw exception
+    return items.size
 
 end Frontier.Journal

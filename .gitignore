@@ -9,3 +9,10 @@ build/
 # Nothing in external/ is covered by `lake build` or `frontier validate`; treat a "0 sorries"
 # grep over it as meaningless. Move a file into Leanproofs/ to have it checked.
 external/
+
+# Process-safe journal transaction sidecars. Lock files are intentionally retained so concurrent
+# processes always coordinate on the same inode; temporary files may survive a killed writer.
+work/.*.lock
+work/.*.tmp
+web/data/work.json.lock
+web/data/work.json.tmp

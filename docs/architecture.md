@@ -51,6 +51,13 @@ the currently loaded environment, and refuses the reconstruction if the resultin
 completion status differ from history. Only after the complete replay agrees is the target bound
 to a fresh session-local state. Rehydration does not rewrite or append to the research stream.
 
+Each attempt stream has a permanent sidecar advisory-lock file. Readers take shared locks; writers
+hold an exclusive lock across reading the current head, allocating event IDs, validation, and
+commit. A writer flushes the complete next stream to a same-directory temporary file and atomically
+renames it into place. Process termination releases the operating-system lock, and a crash before
+rename leaves the previous valid stream visible. The generated work view uses the same publication
+pattern and remains derived, never authoritative.
+
 ## Trust boundary
 
 The trusted result is a compiled Lean declaration and its transitive assumptions. `frontier

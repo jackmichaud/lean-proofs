@@ -16,7 +16,9 @@ def withEmptyJournal {α : Type} (context : Context) (action : IO α) : IO α :=
   let clear : IO Unit := do
     if ← context.workRoot.pathExists then
       for entry in ← context.workRoot.readDir do
-        if entry.fileName.endsWith ".jsonl" then IO.FS.removeFile entry.path
+        if entry.fileName.endsWith ".jsonl" || entry.fileName.endsWith ".lock" ||
+            entry.fileName.endsWith ".tmp" then
+          IO.FS.removeFile entry.path
   clear
   try action finally clear
 
@@ -67,7 +69,20 @@ def testJournalStorage (suite : Suite) (context : Context) : IO Unit :=
     let trusted? := (Json.parse published).toOption.bind fun json =>
       (json.getObjValAs? Bool "trusted").toOption
     check suite "published view is untrusted" (trusted? == some false)
+    let publishTasks ← (Array.range 8).mapM fun _ => IO.asTask (Journal.publish context.workRoot publishPath)
+    let mut publishesOk := true
+    for task in publishTasks do
+      match ← IO.wait task with
+      | .ok count => publishesOk := publishesOk && count == 1
+      | .error _ => publishesOk := false
+    check suite "concurrent journal publication is serialized" publishesOk
+    check suite "concurrent publication leaves valid JSON"
+      ((Json.parse (← IO.FS.readFile publishPath)).toOption.isSome)
+    check suite "publication leaves no temporary file"
+      (!(← (publishPath.toString ++ ".tmp" : System.FilePath).pathExists))
     IO.FS.removeFile publishPath
+    let publishLock : System.FilePath := publishPath.toString ++ ".lock"
+    if ← publishLock.pathExists then IO.FS.removeFile publishLock
 
     let batched ← appendResearch context item.id {
       kind := .agent
@@ -119,12 +134,92 @@ def testJournalStorage (suite : Suite) (context : Context) : IO Unit :=
       (match rejected with | .error _ => true | .ok _ => false)
     let after ← IO.FS.readFile path
     check suite "invalid batch performs no partial write" (after == before)
+    let afterRejected ← appendResearch context item.id {
+      kind := .agent
+      name := "journal-after-rejection"
+      runId := ⟨"journal-after-rejection"⟩
+    } #[.metadataUpdated { metadata := {
+      title := item.title
+      goal := "lock released"
+    } }]
+    check suite "validation failure releases the stream lock" afterRejected.isOk
+    check suite "transaction leaves no temporary stream"
+      (!(← (context.workRoot / s!".{item.id}.tmp").pathExists))
     check suite "empty batch is rejected"
       (match ← appendResearch context item.id {
         kind := .agent
         name := "journal-batch-test"
         runId := ⟨"journal-batch-test"⟩
       } #[] with | .error _ => true | .ok _ => false)
+
+    let concurrent ← workAdd context "Concurrent batches" (some "initial") none none
+    let some concurrentItem := itemOf concurrent |
+      check suite "concurrency fixture created" false
+    let writerCount := 12
+    let tasks ← (Array.range writerCount).mapM fun index =>
+      IO.asTask <| appendResearch context concurrentItem.id {
+        kind := .agent
+        name := s!"writer-{index}"
+        runId := ⟨s!"writer-{index}"⟩
+      } #[
+        .metadataUpdated { metadata := {
+          title := concurrentItem.title
+          goal := s!"writer {index}, first"
+        } },
+        .metadataUpdated { metadata := {
+          title := concurrentItem.title
+          goal := s!"writer {index}, second"
+        } }
+      ]
+    let mut concurrentOk := true
+    for task in tasks do
+      match ← IO.wait task with
+      | .ok result => concurrentOk := concurrentOk && result.isOk
+      | .error _ => concurrentOk := false
+    check suite "concurrent journal transactions all succeed" concurrentOk
+    match ← Research.readEvents context.workRoot ⟨concurrentItem.id⟩ with
+    | .error message => check suite "concurrent stream validates" false message
+    | .ok events =>
+        check suite "concurrent stream has every event"
+          (events.size == 1 + 2 * writerCount)
+        check suite "concurrent sequences are contiguous"
+          (events.map (·.sequence) == (Array.range events.size).map (· + 1))
+        let appended := events.extract 1 events.size
+        let pairsStayTogether := (Array.range writerCount).all fun index =>
+          appended[2 * index]!.actor.name == appended[2 * index + 1]!.actor.name
+        check suite "concurrent batches never interleave" pairsStayTogether
+        let writers := (Array.range writerCount).foldl (init := ({} : Std.HashSet String))
+          fun names index => names.insert appended[2 * index]!.actor.name
+        check suite "every concurrent writer appears once" (writers.size == writerCount)
+    check suite "concurrent commits leave no temporary stream"
+      (!(← (context.workRoot / s!".{concurrentItem.id}.tmp").pathExists))
+
+    let processFixture ← workAdd context "Process concurrency" (some "initial") none none
+    let some processItem := itemOf processFixture |
+      check suite "process concurrency fixture created" false
+    let executable ← IO.appPath
+    let processCount := 6
+    let processes ← (Array.range processCount).mapM fun index => IO.asTask <| IO.Process.output {
+      cmd := executable.toString
+      args := #["storage-worker", context.workRoot.toString, processItem.id, s!"process-{index}"]
+    }
+    let mut processesOk := true
+    for process in processes do
+      match ← IO.wait process with
+      | .ok output => processesOk := processesOk && output.exitCode == 0
+      | .error _ => processesOk := false
+    check suite "independent writer processes all succeed" processesOk
+    match ← Research.readEvents context.workRoot ⟨processItem.id⟩ with
+    | .error message => check suite "process-concurrent stream validates" false message
+    | .ok events =>
+        check suite "process-concurrent stream has every event"
+          (events.size == 1 + 2 * processCount)
+        check suite "process-concurrent sequences are contiguous"
+          (events.map (·.sequence) == (Array.range events.size).map (· + 1))
+        let appended := events.extract 1 events.size
+        check suite "process-concurrent batches never interleave"
+          ((Array.range processCount).all fun index =>
+            appended[2 * index]!.actor.name == appended[2 * index + 1]!.actor.name)
 
 def testWorkCommands (suite : Suite) (context : Context) : IO Unit :=
   withEmptyJournal context do
