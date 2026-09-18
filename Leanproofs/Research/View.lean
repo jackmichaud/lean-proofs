@@ -35,6 +35,69 @@ structure AttemptSummary where
   updatedAt : String := ""
   deriving BEq, Inhabited, Repr
 
+/-- One accepted transition needed to reconstruct a recorded proof state. -/
+structure ReplayTransition where
+  parentStateId : ProofStateId
+  childStateId : ProofStateId
+  action : String
+  goals : Array String := #[]
+  complete : Bool := false
+  deriving BEq, Inhabited, Repr
+
+/-- A pure recipe for rebuilding a proof state in a fresh Lean process. -/
+structure ReplayPlan where
+  proposition : String
+  initialStateId : ProofStateId
+  targetStateId : ProofStateId
+  transitions : Array ReplayTransition := #[]
+  deriving BEq, Inhabited, Repr
+
+private def lineageError (message : String) : Except String α :=
+  .error s!"malformed replay lineage: {message}"
+
+/-- Recover the unique accepted-action path from an attempt's initial state to `targetStateId`.
+The recorded child IDs are labels for checking replay results; they are not live Lean state IDs. -/
+def replayPlan (attemptId : AttemptId) (events : Array Event)
+    (targetStateId : ProofStateId) : Except String ReplayPlan := do
+  match validateStream attemptId events with
+  | .error message => lineageError message
+  | .ok _ => pure ()
+  let some first := events[0]? | return ← lineageError "attempt stream is empty"
+  let (.attemptCreated created) := first.payload |
+    return ← lineageError "attempt stream does not begin with attempt.created"
+  let some proposition := created.proposition? |
+    throw "cannot build a replay plan: attempt has no proposition"
+  let some initialStateId := created.initialStateId? |
+    return ← lineageError "attempt proposition has no initial state"
+  let mut current := targetStateId
+  let mut reversed : Array ReplayTransition := #[]
+  let mut visited : Std.HashSet ProofStateId := {}
+  while current != initialStateId do
+    if visited.contains current then
+      return ← lineageError s!"cycle at proof state '{current.value}'"
+    visited := visited.insert current
+    let parents := events.filterMap fun event => match event.payload with
+      | .actionEvaluated value =>
+          if value.outcome == .accepted && value.childStateId? == some current then some value else none
+      | _ => none
+    if parents.size == 0 then
+      throw s!"unknown or unreachable proof state '{targetStateId.value}'"
+    unless parents.size == 1 do
+      return ← lineageError s!"proof state '{current.value}' has multiple accepted parents"
+    let transition := parents[0]!
+    reversed := reversed.push {
+      parentStateId := transition.parentStateId
+      childStateId := current
+      action := transition.action
+      goals := transition.goals
+      complete := transition.complete }
+    current := transition.parentStateId
+  let transitions := reversed.reverse
+  for index in [:transitions.size] do
+    if transitions[index]!.complete && index + 1 < transitions.size then
+      return ← lineageError s!"completed proof state '{transitions[index]!.childStateId.value}' has descendants"
+  return { proposition, initialStateId, targetStateId, transitions }
+
 private def initialStage (metadata : WorkMetadata) : Stage :=
   if metadata.draftPath?.isSome then .drafting else .exploring
 

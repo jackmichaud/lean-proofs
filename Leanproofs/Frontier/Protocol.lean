@@ -295,9 +295,22 @@ private def proofStepJson (step : ProofStep) : Json := Json.mkObj [
   ("complete", toJson step.isComplete)
 ]
 
-private def actionResultJson (result : ProofActionResult) : Json :=
+private def initialResearchStateId : Research.ProofStateId := ⟨"root"⟩
+
+private def childResearchStateId (transitionId : Research.TransitionId) : Research.ProofStateId :=
+  ⟨s!"after-{transitionId.value}"⟩
+
+private def researchProofStepJson (stateId : Research.ProofStateId) (step : ProofStep) : Json :=
+  Json.mergeObj (proofStepJson step) (Json.mkObj [("stateId", toJson stateId.value)])
+
+private def actionResultJson (action : API.BatchAction) (result : ProofActionResult) : Json :=
+  let stateId? := match result.outcome with
+    | .accepted | .complete => some (childResearchStateId action.transitionId)
+    | _ => none
   let stepFields := match result.step? with
-    | some step => proofStepJson step
+    | some step => match stateId? with
+        | some stateId => researchProofStepJson stateId step
+        | none => Json.mergeObj (proofStepJson step) (Json.mkObj [("stateId", .null)])
     | none => Json.mkObj [
         ("stateId", .null), ("goals", toJson (#[] : Array String)),
         ("errors", toJson (result.error?.toArray)),
@@ -319,11 +332,34 @@ private def invalidGoal (context : Context) (request : API.Request) (message : S
 private def missingState (context : Context) (request : API.Request) (message : String) : Json :=
   requestFailure context request { code := .stateNotFound, message }
 
+private def replayDiverged (context : Context) (request : API.Request) (message : String) : Json :=
+  requestFailure context request { code := .replayDiverged, message }
+
 private def researchFailure (context : Context) (request : API.Request) (message : String) : Json :=
   requestFailure context request { code := .researchState, message }
 
-private def researchStateId (id : Nat) : Research.ProofStateId :=
-  ⟨s!"state-{id}"⟩
+private def researchStateKey (attemptId : Research.AttemptId)
+    (stateId : Research.ProofStateId) : String :=
+  attemptId.value ++ ":" ++ stateId.value
+
+private def bindResearchState (context : Context) (attemptId : Research.AttemptId)
+    (stateId : Research.ProofStateId) (liveId : Nat) : IO Unit := do
+  let states ← context.researchProofStatesRef.get
+  context.researchProofStatesRef.set (states.insert (researchStateKey attemptId stateId) liveId)
+
+private def liveResearchState (context : Context) (attemptId : Research.AttemptId)
+    (stateId : Research.ProofStateId) : IO (Except String ProofState) := do
+  let states ← context.researchProofStatesRef.get
+  let some liveId := states[researchStateKey attemptId stateId]?
+    | return .error s!"proof state '{stateId.value}' is not live in this session; call proof.rehydrate"
+  context.proofState? liveId
+
+private def recordedStateEnvironment? (events : Array Research.Event)
+    (stateId : Research.ProofStateId) : Option Research.EnvironmentFingerprint :=
+  events.findSome? fun event => match event.payload with
+    | .attemptCreated value => if value.initialStateId? == some stateId then some event.environment else none
+    | .actionEvaluated value => if value.childStateId? == some stateId then some event.environment else none
+    | _ => none
 
 private def loadAttemptEvents (context : Context) (request : API.Request)
     (attemptId : Research.AttemptId) : IO (Except Json (Array Research.Event)) := do
@@ -348,7 +384,7 @@ private def evaluationOutcome : ProofActionOutcome → Research.EvaluationOutcom
 private def evaluationPayload (parentStateId : Research.ProofStateId)
     (heartbeats : Nat) (action : API.BatchAction) (result : ProofActionResult) : Research.Payload :=
   let childStateId? := match result.outcome, result.step? with
-    | .accepted, some step | .complete, some step => some (researchStateId step.id)
+    | .accepted, some _ | .complete, some _ => some (childResearchStateId action.transitionId)
     | _, _ => none
   let diagnostics := match result.step? with
     | some step => step.errors ++ step.policyErrors
@@ -403,16 +439,19 @@ def computeTyped (context : Context) (request : API.Request) : IO Json := do
               goal := params.goal
               note? := params.note?
             }
-            initialStateId? := initialStep?.map fun step => researchStateId step.id
+            proposition? := params.proposition?
+            initialStateId? := initialStep?.map fun _ => initialResearchStateId
             parentAttemptId? := params.parentAttemptId?
           }
           match ← appendResearch context attemptId.value request.actor #[payload] with
           | .error message => return researchFailure context request message
           | .ok _ =>
+              if let some step := initialStep? then
+                bindResearchState context attemptId initialResearchStateId step.id
               return API.successResponse context request (Json.mkObj [
                 ("attemptId", toJson attemptId.value),
                 ("initialProofState", match initialStep? with
-                  | some step => proofStepJson step
+                  | some step => researchProofStepJson initialResearchStateId step
                   | none => .null)])
       | "research.attempt.list" =>
           if let .error error := API.emptyParams request then
@@ -488,11 +527,11 @@ def computeTyped (context : Context) (request : API.Request) : IO Json := do
           let events ← match ← loadAttemptEvents context request attemptId with
             | .ok value => pure value
             | .error response => return response
-          let parentStateId := researchStateId params.parentStateId
+          let parentStateId := params.parentStateId
           unless ownsState events parentStateId do
             return researchFailure context request
-              s!"proof state {params.parentStateId} does not belong to attempt '{attemptId.value}'"
-          let state ← match ← context.proofState? params.parentStateId with
+              s!"proof state '{params.parentStateId.value}' does not belong to attempt '{attemptId.value}'"
+          let state ← match ← liveResearchState context attemptId parentStateId with
             | .ok value => pure value
             | .error message => return missingState context request message
           let actions := params.actions.map fun action =>
@@ -514,10 +553,16 @@ def computeTyped (context : Context) (request : API.Request) : IO Json := do
           match ← appendResearch context attemptId.value request.actor payloads with
           | .error message => return researchFailure context request message
           | .ok _ =>
+              for (action, result) in params.actions.zip batch.results do
+                match result.outcome, result.step? with
+                | .accepted, some step | .complete, some step =>
+                    bindResearchState context attemptId (childResearchStateId action.transitionId) step.id
+                | _, _ => pure ()
               return API.successResponse context request (Json.mkObj [
                 ("attemptId", toJson attemptId.value),
-                ("parentStateId", toJson params.parentStateId),
-                ("results", Json.arr (batch.results.map actionResultJson))])
+                ("parentStateId", toJson params.parentStateId.value),
+                ("results", Json.arr ((params.actions.zip batch.results).map fun pair =>
+                  actionResultJson pair.1 pair.2))])
       | "proof.inspectState" =>
           let attemptId ← match API.requireAttemptId request with
             | .ok value => pure value
@@ -528,18 +573,67 @@ def computeTyped (context : Context) (request : API.Request) : IO Json := do
           let events ← match ← loadAttemptEvents context request attemptId with
             | .ok value => pure value
             | .error response => return response
-          unless ownsState events (researchStateId params.stateId) do
+          unless ownsState events params.stateId do
             return researchFailure context request
-              s!"proof state {params.stateId} does not belong to attempt '{attemptId.value}'"
-          match ← context.proofState? params.stateId with
+              s!"proof state '{params.stateId.value}' does not belong to attempt '{attemptId.value}'"
+          match ← liveResearchState context attemptId params.stateId with
           | .error message => return missingState context request message
           | .ok state =>
               match ← runProofStep context (.resume state) none params.heartbeats with
               | .error message => return invalidGoal context request message
               | .ok step =>
                   return API.successResponse context request (Json.mergeObj
-                    (Json.mkObj [("requestedStateId", toJson params.stateId)])
-                    (proofStepJson { step with id := params.stateId }))
+                    (Json.mkObj [("requestedStateId", toJson params.stateId.value)])
+                    (researchProofStepJson params.stateId step))
+      | "proof.rehydrate" =>
+          let attemptId ← match API.requireAttemptId request with
+            | .ok value => pure value
+            | .error error => return requestFailure context request error
+          let params ← match API.rehydrateParams request with
+            | .ok value => pure value
+            | .error error => return requestFailure context request error
+          let events ← match ← loadAttemptEvents context request attemptId with
+            | .ok value => pure value
+            | .error response => return response
+          let plan ← match Research.replayPlan attemptId events params.stateId with
+            | .ok value => pure value
+            | .error message => return researchFailure context request message
+          -- Replay against isolated state storage. A divergent history must not consume or bind
+          -- states in the caller's live session.
+          let replayContext := { context with
+            proofStatesRef := ← IO.mkRef ({}, 1)
+            researchProofStatesRef := ← IO.mkRef {}
+          }
+          let mut step ← match ← runProofStep replayContext (.proposition plan.proposition)
+              none params.heartbeats with
+            | .ok value => pure value
+            | .error message =>
+                return replayDiverged context request (s!"the recorded proposition no longer elaborates: {message}")
+          for transition in plan.transitions do
+            let state : ProofState := { goalSource := plan.proposition, script := step.script }
+            step ← match ← runProofStep replayContext (.resume state) (some transition.action)
+                params.heartbeats with
+              | .ok value => pure value
+              | .error message =>
+                  return replayDiverged context request (s!"replay failed before state '{transition.childStateId.value}': {message}")
+            unless step.errors.isEmpty && step.policyErrors.isEmpty do
+              return replayDiverged context request
+                s!"replay rejected the action producing state '{transition.childStateId.value}'"
+            unless step.goals == transition.goals && step.isComplete == transition.complete do
+              return replayDiverged context request
+                s!"replay drifted at state '{transition.childStateId.value}'"
+          let liveId ← context.storeProofState { goalSource := plan.proposition, script := step.script }
+          bindResearchState context attemptId params.stateId liveId
+          let sourceEnvironment? := recordedStateEnvironment? events params.stateId
+          return API.successResponse context request (Json.mergeObj
+            (Json.mkObj [
+              ("attemptId", toJson attemptId.value),
+              ("rehydratedTransitions", toJson plan.transitions.size),
+              ("sourceEnvironment", sourceEnvironment?.map Research.environmentJson |>.getD .null),
+              ("environmentChanged", toJson (sourceEnvironment?.any
+                (· != context.fingerprint.environment))),
+              ("replayMatchedHistory", toJson true)])
+            (researchProofStepJson params.stateId step))
       | operation =>
           return requestFailure context request {
             code := .unsupportedOperation

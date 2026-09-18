@@ -38,6 +38,11 @@ results the proofs reuse. It does not touch the registry, so it is cheap to run 
 fail. `--work` records the report against a journal item, which is the only reason any of it
 survives your session.
 
+Typed agent sessions use durable, attempt-scoped proof state ids. After restarting `frontier
+serve`, read the attempt with `research.attempt.get`, choose the exact recorded branch you want,
+and call `proof.rehydrate` before inspecting or extending that state. Replay is checked against
+the current Lean environment and fails explicitly if the recorded branch has drifted.
+
 ## Use a session
 
 Importing mathlib with the delaborators loaded costs about twenty seconds, and every one-shot

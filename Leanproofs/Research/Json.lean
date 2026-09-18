@@ -148,7 +148,8 @@ private def idArrayField [FromJson α] (json : Json) (key : String) : Except Str
 
 private def payloadDataJson : Payload → Json
   | .attemptCreated v => Json.mkObj [("metadata", metadataJson v.metadata),
-      ("initialStateId", optionJson v.initialStateId?), ("parentAttemptId", optionJson v.parentAttemptId?)]
+      ("initialStateId", optionJson v.initialStateId?), ("proposition", optionJson v.proposition?),
+      ("parentAttemptId", optionJson v.parentAttemptId?)]
   | .metadataUpdated v => Json.mkObj [("metadata", metadataJson v.metadata)]
   | .stageChanged v => Json.mkObj [("from", toJson v.fromStage.toString), ("to", toJson v.toStage.toString),
       ("reason", optionJson v.reason?)]
@@ -173,10 +174,11 @@ private def payloadDataJson : Payload → Json
 def payloadOfJson (kind : String) (json : Json) : Except String Payload := do
   match kind with
   | "attempt.created" =>
-      exactObject json ["metadata", "initialStateId", "parentAttemptId"]
+      exactObject json ["metadata", "initialStateId", "proposition", "parentAttemptId"]
       return .attemptCreated {
         metadata := ← metadataOfJson (← field json "metadata")
         initialStateId? := ← optionalIdField json "initialStateId"
+        proposition? := ← optionalStringField json "proposition"
         parentAttemptId? := ← optionalIdField json "parentAttemptId" }
   | "attempt.metadata-updated" =>
       exactObject json ["metadata"]
@@ -257,7 +259,7 @@ def eventOfJson (json : Json) : Except String Event := do
   exactObject json ["schemaVersion", "trusted", "eventId", "attemptId", "sequence", "occurredAt",
     "environment", "actor", "kind", "payload"]
   let version ← natField json "schemaVersion"
-  unless version == 2 do throw s!"unsupported research event schema version {version}"
+  unless version == 3 do throw s!"unsupported research event schema version {version}"
   if ← boolField json "trusted" then throw "research events must declare trusted=false"
   let kind ← stringField json "kind"
   return {

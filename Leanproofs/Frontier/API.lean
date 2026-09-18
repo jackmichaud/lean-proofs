@@ -28,6 +28,7 @@ inductive ErrorCode where
   | environmentMismatch
   | invalidGoal
   | stateNotFound
+  | replayDiverged
   | researchState
   | internalError
   deriving BEq, DecidableEq, Inhabited, Repr
@@ -40,6 +41,7 @@ def ErrorCode.toString : ErrorCode → String
   | .environmentMismatch => "ENVIRONMENT_MISMATCH"
   | .invalidGoal => "INVALID_GOAL"
   | .stateNotFound => "STATE_NOT_FOUND"
+  | .replayDiverged => "REPLAY_DIVERGED"
   | .researchState => "RESEARCH_STATE_ERROR"
   | .internalError => "INTERNAL_ERROR"
 
@@ -84,12 +86,16 @@ structure BatchAction where
   retrievalIds : Array Research.RetrievalId := #[]
 
 structure BatchParams where
-  parentStateId : Nat
+  parentStateId : Research.ProofStateId
   actions : Array BatchAction
   heartbeats : Nat := CLI.defaultTacticHeartbeats
 
 structure InspectParams where
-  stateId : Nat
+  stateId : Research.ProofStateId
+  heartbeats : Nat := CLI.defaultTacticHeartbeats
+
+structure RehydrateParams where
+  stateId : Research.ProofStateId
   heartbeats : Nat := CLI.defaultTacticHeartbeats
 
 private def fail (code : ErrorCode) (message : String) : Except Error α :=
@@ -187,6 +193,11 @@ private def optionalBool (json : Json) (key : String) (fallback : Bool) : Except
   | .ok value => value.getBool? |>.mapError fun _ =>
       { code := .invalidParams, message := s!"field '{key}' must be a boolean" }
 
+private def proofStateId (json : Json) (key : String) : Except Error Research.ProofStateId := do
+  let value ← paramString json key
+  Research.ProofStateId.parse value |>.mapError fun message =>
+    { code := .invalidParams, message }
+
 /-- Decode the exact typed request envelope. Arrays and unknown envelope fields are rejected. -/
 def requestOfJson (json : Json) : Except Error Request := do
   exactObject json ["apiVersion", "requestId", "operation", "params", "provenance"]
@@ -258,7 +269,8 @@ def capabilitiesJson : Json :=
     ("apiVersions", toJson #[version]),
     ("operations", toJson #["capabilities.get", "environment.describe",
       "research.attempt.create", "research.attempt.list", "research.attempt.get",
-      "declarations.search", "premises.retrieve", "proof.evaluateBatch", "proof.inspectState"]),
+      "declarations.search", "premises.retrieve", "proof.evaluateBatch", "proof.inspectState",
+      "proof.rehydrate"]),
     ("envelope", Json.mkObj [
       ("required", toJson #["apiVersion", "requestId", "operation", "params", "provenance"]),
       ("optional", toJson #["environment", "attemptId"]),
@@ -297,10 +309,13 @@ def capabilitiesJson : Json :=
         ("actionOptional", toJson #["retrievalIds"])],
       Json.mkObj [("operation", toJson "proof.inspectState"), ("attempt", toJson "required"),
         ("effect", toJson "read"), ("requiredParams", toJson #["stateId"]),
+        ("optionalParams", toJson #["heartbeats"])],
+      Json.mkObj [("operation", toJson "proof.rehydrate"), ("attempt", toJson "required"),
+        ("effect", toJson "session"), ("requiredParams", toJson #["stateId"]),
         ("optionalParams", toJson #["heartbeats"])]
     ]),
     ("researchHistory", Json.mkObj [
-      ("schemaVersion", toJson (2 : Nat)), ("trusted", toJson false),
+      ("schemaVersion", toJson (3 : Nat)), ("trusted", toJson false),
       ("appendOnly", toJson true)]),
     ("transport", toJson "local-ndjson"),
     ("authority", toJson "local-process"),
@@ -422,7 +437,7 @@ private def batchAction (json : Json) : Except Error BatchAction := do
 
 def batchParams (request : Request) : Except Error BatchParams := do
   exactObject request.params ["parentStateId", "actions"] ["heartbeats"]
-  let parentStateId ← paramNat request.params "parentStateId"
+  let parentStateId ← proofStateId request.params "parentStateId"
   let values ← (← paramField request.params "actions").getArr? |>.mapError fun _ =>
     { code := .invalidParams, message := "field 'actions' must be an array" }
   if values.isEmpty then fail .invalidParams "field 'actions' must not be empty"
@@ -439,7 +454,14 @@ def batchParams (request : Request) : Except Error BatchParams := do
 
 def inspectParams (request : Request) : Except Error InspectParams := do
   exactObject request.params ["stateId"] ["heartbeats"]
-  let stateId ← paramNat request.params "stateId"
+  let stateId ← proofStateId request.params "stateId"
+  let heartbeats ← optionalNat request.params "heartbeats" CLI.defaultTacticHeartbeats
+  if heartbeats == 0 then fail .invalidParams "field 'heartbeats' must be positive in a session"
+  return { stateId, heartbeats }
+
+def rehydrateParams (request : Request) : Except Error RehydrateParams := do
+  exactObject request.params ["stateId"] ["heartbeats"]
+  let stateId ← proofStateId request.params "stateId"
   let heartbeats ← optionalNat request.params "heartbeats" CLI.defaultTacticHeartbeats
   if heartbeats == 0 then fail .invalidParams "field 'heartbeats' must be positive in a session"
   return { stateId, heartbeats }

@@ -42,6 +42,15 @@ those boundaries instead of pretending it ran in one immutable process. A clean 
 supports a content-addressed claim; dirty or unavailable source is labeled explicitly as
 non-content-addressed rather than being presented as reproducible.
 
+## Durable proof states
+
+Typed research operations expose attempt-scoped state names, not Lean process cache addresses.
+The creation event retains the original proposition and accepted evaluations form explicit
+parent/child edges. `proof.rehydrate` follows one caller-selected ancestry, replays its tactics in
+the currently loaded environment, and refuses the reconstruction if the resulting goals or
+completion status differ from history. Only after the complete replay agrees is the target bound
+to a fresh session-local state. Rehydration does not rewrite or append to the research stream.
+
 ## Trust boundary
 
 The trusted result is a compiled Lean declaration and its transitive assumptions. `frontier

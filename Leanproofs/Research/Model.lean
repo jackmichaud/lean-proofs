@@ -100,6 +100,7 @@ structure WorkMetadata where
 structure AttemptCreated where
   metadata : WorkMetadata
   initialStateId? : Option ProofStateId := none
+  proposition? : Option String := none
   parentAttemptId? : Option AttemptId := none
   deriving BEq, Inhabited, Repr
 
@@ -205,7 +206,7 @@ def Payload.kind : Payload → String
 
 /-- Sequence numbers begin at one and are contiguous within one attempt stream. -/
 structure Event where
-  schemaVersion : Nat := 2
+  schemaVersion : Nat := 3
   eventId : EventId
   attemptId : AttemptId
   sequence : Nat

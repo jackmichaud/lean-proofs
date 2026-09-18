@@ -156,6 +156,9 @@ structure Context where
   session: a one-shot command exits before a second request could name one, which is why
   `Context.proofState?` says so rather than reporting a bare miss. -/
   proofStatesRef : IO.Ref (Std.HashMap Nat ProofState × Nat)
+  /-- Attempt-scoped durable state ids mapped to the session-local replay states that implement
+  them. Typed research operations never expose the numeric ids in `proofStatesRef`. -/
+  researchProofStatesRef : IO.Ref (Std.HashMap String Nat)
   /-- Where the work journal lives. See `Leanproofs/Journal.lean`; it is untrusted data and
   never participates in an audit. -/
   workRoot : System.FilePath
@@ -186,7 +189,8 @@ def Context.of (env : Environment) (catalog : Knowledge.Registry)
     premiseIndexRef := ← IO.mkRef none
     -- Ids start at one: `prove --state 0` reads as a mistake, and it is useful for that to be
     -- reported as one rather than resolving to the first attempt of the session.
-    proofStatesRef := ← IO.mkRef ({}, 1) }
+    proofStatesRef := ← IO.mkRef ({}, 1)
+    researchProofStatesRef := ← IO.mkRef {} }
 
 /-- The default context: journal at `FRONTIER_WORK_DIR` or `work/`, publishing to the path the
 web workspace fetches. -/

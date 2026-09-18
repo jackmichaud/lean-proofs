@@ -236,10 +236,12 @@ Ordered by value per unit of work, following the build order above.
 2. **Done.** `--json` on every one-shot command, and a typed `frontier.agent/v1` protocol for a
    warm environment. Native operations cover capabilities, environment description, attempt
    creation and history reads, declaration search, premise retrieval, independent batch tactic
-   evaluation, and proof-state inspection. Attempt-scoped retrievals and proof evaluations append
-   their complete inputs and outcomes to the research event stream. Session responses expose a
-   source-aware SHA-256 environment fingerprint for pinning. `frontier check` remains the local
-   propose-check-iterate loop that does not require editing the registry.
+   evaluation, proof-state inspection, and checked branch rehydration after a process restart.
+   Typed proof states have durable attempt-scoped ids; process-local Lean state addresses are not
+   serialized. Attempt-scoped retrievals and proof evaluations append their complete inputs and
+   outcomes to the research event stream. Session responses expose a source-aware SHA-256
+   environment fingerprint for pinning. `frontier check` remains the local propose-check-iterate
+   loop that does not require editing the registry.
 3. **Done.** Negative fixtures for the audit (`lake exe frontier-test`), including that a
    `sorry` and a `native_decide` are rejected in a draft. The gate is only worth what its
    rejections are worth, and those were previously untested.

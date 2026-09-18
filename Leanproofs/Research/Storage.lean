@@ -67,7 +67,7 @@ private def validateEnvironment (environment : EnvironmentFingerprint) : Except 
   nonempty "policy version" environment.policyVersion
 
 private def validateEventValues (event : Event) : Except String Unit := do
-  unless event.schemaVersion == 2 do throw s!"unsupported research event schema version {event.schemaVersion}"
+  unless event.schemaVersion == 3 do throw s!"unsupported research event schema version {event.schemaVersion}"
   let _ ← validateIdValue "event id" event.eventId.value
   let _ ← validateIdValue "attempt id" event.attemptId.value
   let _ ← validateIdValue "run id" event.actor.runId.value
@@ -78,6 +78,9 @@ private def validateEventValues (event : Event) : Except String Unit := do
   | .attemptCreated value =>
       validateMetadata value.metadata
       if let some id := value.initialStateId? then let _ ← validateIdValue "proof state id" id.value
+      if let some proposition := value.proposition? then nonempty "proposition" proposition
+      unless value.initialStateId?.isSome == value.proposition?.isSome do
+        throw "initial state id and proposition must either both be present or both be absent"
       if let some id := value.parentAttemptId? then
         let _ ← validateIdValue "parent attempt id" id.value
         if id == event.attemptId then throw "an attempt cannot be its own parent"
@@ -108,6 +111,8 @@ private def validateEventValues (event : Event) : Except String Unit := do
         throw "a non-accepted action cannot produce a child state"
       if value.complete && value.outcome != .accepted then
         throw "only an accepted action can be complete"
+      if value.outcome == .accepted && value.complete != value.goals.isEmpty then
+        throw "an accepted action is complete exactly when it has no goals"
   | .branchSelected value => let _ ← validateIdValue "proof state id" value.stateId.value
   | .branchAbandoned value =>
       let _ ← validateIdValue "proof state id" value.stateId.value
@@ -132,6 +137,9 @@ def validateStream (attemptId : AttemptId) (events : Array Event) : Except Strin
   let mut transitionIds : Std.HashSet TransitionId := {}
   let mut retrievalIds : Std.HashSet RetrievalId := {}
   let mut stateIds : Std.HashSet ProofStateId := {}
+  let mut completedStates : Std.HashSet ProofStateId := {}
+  let mut abandonedStates : Std.HashSet ProofStateId := {}
+  let mut pendingAction? : Option ActionProposed := none
   let mut timestamp? : Option String := none
   let mut stage := Stage.exploring
   let mut promoted := false
@@ -151,6 +159,10 @@ def validateStream (attemptId : AttemptId) (events : Array Event) : Except Strin
     if index == 0 then
       unless isAttemptCreated event.payload do throw "the first event in an attempt stream must be attempt.created"
     else if isAttemptCreated event.payload then throw "attempt.created may only be the first event in a stream"
+    if pendingAction?.isSome then
+      match event.payload with
+      | .actionEvaluated _ => pure ()
+      | _ => throw "action.proposed must be followed by action.evaluated"
     match event.payload with
     | .attemptCreated value =>
         stage := if value.metadata.draftPath?.isSome then .drafting else .exploring
@@ -166,19 +178,31 @@ def validateStream (attemptId : AttemptId) (events : Array Event) : Except Strin
         retrievalIds := retrievalIds.insert value.retrievalId
     | .actionProposed value =>
         unless stateIds.contains value.stateId do throw s!"unknown proof state '{value.stateId.value}'"
+        if completedStates.contains value.stateId then
+          throw s!"completed proof state '{value.stateId.value}' cannot be extended"
+        if abandonedStates.contains value.stateId then
+          throw s!"abandoned proof state '{value.stateId.value}' cannot be extended"
         for id in value.retrievalIds do
           unless retrievalIds.contains id do throw s!"unknown retrieval id '{id.value}'"
+        pendingAction? := some value
     | .actionEvaluated value =>
+        let some proposed := pendingAction? |
+          throw "action.evaluated must immediately follow action.proposed"
+        unless proposed.stateId == value.parentStateId && proposed.action == value.action do
+          throw "action.evaluated does not match its preceding action.proposed"
+        pendingAction? := none
         unless stateIds.contains value.parentStateId do throw s!"unknown parent state '{value.parentStateId.value}'"
         if transitionIds.contains value.transitionId then throw s!"duplicate transition id '{value.transitionId.value}'"
         transitionIds := transitionIds.insert value.transitionId
         if let some child := value.childStateId? then
           if stateIds.contains child then throw s!"duplicate proof state id '{child.value}'"
           stateIds := stateIds.insert child
+          if value.complete then completedStates := completedStates.insert child
     | .branchSelected value =>
         unless stateIds.contains value.stateId do throw s!"unknown proof state '{value.stateId.value}'"
     | .branchAbandoned value =>
         unless stateIds.contains value.stateId do throw s!"unknown proof state '{value.stateId.value}'"
+        abandonedStates := abandonedStates.insert value.stateId
     | .artifactChecked value =>
         if stage != .registered && stage != .abandoned then
           stage := if value.clean then .clean else .drafting
@@ -188,6 +212,7 @@ def validateStream (attemptId : AttemptId) (events : Array Event) : Except Strin
         if promoted then throw "an attempt may only be promoted once"
         promoted := true
         stage := .registered
+  if pendingAction?.isSome then throw "action.proposed must be followed by action.evaluated"
 
 /-- Read and validate one attempt's JSONL stream. Every physical nonterminal line is an event. -/
 def readEvents (root : System.FilePath) (attemptId : AttemptId) : IO (Except String (Array Event)) := do

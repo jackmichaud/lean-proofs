@@ -86,7 +86,7 @@ def testAPI (suite : Suite) (context : Context) : IO Unit := do
     ((capabilities.getObjValAs? Bool "ok").toOption == some true)
   check suite "capabilities describe operation contracts"
     ((result? capabilities >>= fun result =>
-      (result.getObjVal? "contracts" >>= Json.getArr?).toOption).any (·.size == 9))
+      (result.getObjVal? "contracts" >>= Json.getArr?).toOption).any (·.size == 10))
 
   let unsupported := { request with operation := "cli.execute" }
   let unsupportedResponse ← computeTyped context unsupported
@@ -128,8 +128,9 @@ def testAPI (suite : Suite) (context : Context) : IO Unit := do
     | check suite "attempt creation returns a result" false
   let some initialProof := createdResult.getObjVal? "initialProofState" |>.toOption
     | check suite "attempt creation returns an initial proof state" false
-  let some initialStateId := (initialProof.getObjVal? "stateId" >>= Json.getNat?).toOption
-    | check suite "initial proof state has a numeric id" false
+  let some initialStateId := fieldString? initialProof "stateId"
+    | check suite "initial proof state has a durable id" false
+  check suite "initial proof state uses the attempt root id" (initialStateId == "root")
 
   let attempts ← computeTyped context (mkRequest "research.attempt.list" (Json.mkObj []))
   check suite "typed clients can list durable attempts"
@@ -213,8 +214,8 @@ def testAPI (suite : Suite) (context : Context) : IO Unit := do
     | check suite "second attempt creation returns a result" false
   let some otherProof := otherResult.getObjVal? "initialProofState" |>.toOption
     | check suite "second attempt returns an initial proof state" false
-  let some arithmeticStateId := (otherProof.getObjVal? "stateId" >>= Json.getNat?).toOption
-    | check suite "second initial proof state has a numeric id" false
+  let some arithmeticStateId := fieldString? otherProof "stateId"
+    | check suite "second initial proof state has a durable id" false
   let policyBatch ← computeTyped context (mkRequest "proof.evaluateBatch" (Json.mkObj [
     ("parentStateId", toJson arithmeticStateId),
     ("actions", Json.arr #[
@@ -232,8 +233,10 @@ def testAPI (suite : Suite) (context : Context) : IO Unit := do
 
   let some advance := actionResult? batch "advance"
     | check suite "accepted actions return inspectable states" false
-  let some stateId := (advance.getObjVal? "stateId" >>= Json.getNat?).toOption
-    | check suite "accepted actions return numeric state ids" false
+  let some stateId := fieldString? advance "stateId"
+    | check suite "accepted actions return durable state ids" false
+  check suite "child state ids derive from durable transition ids"
+    (stateId == "after-transition-advance")
   let inspected ← computeTyped context (mkRequest "proof.inspectState"
     (Json.mkObj [("stateId", toJson stateId)]) "inspect-1" (some attemptId))
   check suite "stored proof states can be inspected"
@@ -243,6 +246,50 @@ def testAPI (suite : Suite) (context : Context) : IO Unit := do
     (Json.mkObj [("stateId", toJson stateId)]) "inspect-wrong-owner" (some otherAttemptId))
   check suite "proof states cannot cross attempt boundaries"
     (errorCode? wrongOwner == some "RESEARCH_STATE_ERROR")
+
+  let restarted : Context := { context with
+    proofStatesRef := ← IO.mkRef ({}, 1)
+    researchProofStatesRef := ← IO.mkRef {}
+  }
+  let missingAfterRestart ← computeTyped restarted (mkRequest "proof.inspectState"
+    (Json.mkObj [("stateId", toJson stateId)]) "inspect-after-restart" (some attemptId))
+  check suite "durable history is distinct from a live state"
+    (errorCode? missingAfterRestart == some "STATE_NOT_FOUND")
+  let originalStream ← IO.FS.readFile attemptPath
+  let parsedEvents ← Research.readEvents context.workRoot ⟨attemptId⟩
+  let tamperedEvents := parsedEvents.toOption.getD #[] |>.map fun event =>
+    match event.payload with
+    | .actionEvaluated value =>
+        if value.childStateId? == some ⟨stateId⟩ then
+          { event with payload := .actionEvaluated { value with goals := #["tampered goal"] } }
+        else event
+    | _ => event
+  IO.FS.writeFile attemptPath
+    ("\n".intercalate (tamperedEvents.map (Research.eventJson · |>.compress)).toList ++ "\n")
+  let divergent ← computeTyped restarted (mkRequest "proof.rehydrate"
+    (Json.mkObj [("stateId", toJson stateId)]) "rehydrate-drift" (some attemptId))
+  check suite "rehydration rejects recorded goal drift"
+    (errorCode? divergent == some "REPLAY_DIVERGED")
+  check suite "failed rehydration installs no live binding"
+    ((← restarted.researchProofStatesRef.get).isEmpty)
+  IO.FS.writeFile attemptPath originalStream
+  let rehydrated ← computeTyped restarted (mkRequest "proof.rehydrate"
+    (Json.mkObj [("stateId", toJson stateId)]) "rehydrate-1" (some attemptId))
+  check suite "a fresh session can rehydrate a recorded branch"
+    ((rehydrated.getObjValAs? Bool "ok").toOption == some true &&
+      (result? rehydrated >>= fun value => fieldString? value "stateId") == some stateId)
+  check suite "rehydration reports verified history"
+    ((result? rehydrated >>= fun value => value.getObjValAs? Bool "replayMatchedHistory" |>.toOption)
+      == some true)
+  let continued ← computeTyped restarted (mkRequest "proof.evaluateBatch" (Json.mkObj [
+    ("parentStateId", toJson stateId),
+    ("actions", Json.arr #[Json.mkObj [
+      ("id", toJson "continue"), ("tactic", toJson "simp"),
+      ("transitionId", toJson "transition-after-restart")]])])
+    "batch-after-restart" (some attemptId))
+  check suite "proof search continues from a rehydrated state"
+    ((actionResult? continued "continue" >>= fun value => fieldString? value "outcome")
+      == some "complete")
 
   match ← Research.readEvents context.workRoot ⟨attemptId⟩ with
   | .error message => check suite "agent activity has a valid event stream" false message
@@ -254,7 +301,7 @@ def testAPI (suite : Suite) (context : Context) : IO Unit := do
       check suite "batch actions and evaluations are recorded"
         ((events.filter fun event => match event.payload with
           | .actionProposed _ | .actionEvaluated _ => true
-          | _ => false).size == 6)
+          | _ => false).size == 8)
       check suite "agent provenance reaches durable events"
         (events.all fun event => event.actor.name == "test-agent" && event.actor.model? == some "test-model")
   if ← attemptPath.pathExists then IO.FS.removeFile attemptPath

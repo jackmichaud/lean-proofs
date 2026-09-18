@@ -139,8 +139,11 @@ Research operations are attempt-scoped. `research.attempt.create` creates the ap
 and may open an initial Lean proposition; `premises.retrieve` records its ranked candidates, and
 `proof.evaluateBatch` records every proposed tactic and verifier outcome against a state owned by
 that attempt. `research.attempt.list` and `research.attempt.get` let a later session discover and
-reconstruct that work. This makes branching and failed approaches durable research data without
-treating them as mathematical evidence.
+reconstruct that work. Typed proof state ids are durable and attempt-scoped, rather than addresses
+into one process's cache. After a restart, `proof.rehydrate` replays an explicitly selected branch,
+checks its goals and completion status against the recorded observations, and makes that state live
+again. This makes branching and failed approaches durable research data without treating them as
+mathematical evidence.
 
 The premise corpus is prepared once per session — every imported theorem reduced to sorted
 constant arrays and an IDF mass — on the first `suggest`. That call pays for the whole corpus;
