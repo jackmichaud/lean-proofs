@@ -4,7 +4,7 @@ Released under Apache 2.0 license as described in the file LICENSE.
 Authors: Jack Michaud
 -/
 
-import Leanproofs.Frontier.Protocol
+import Leanproofs.Frontier.MCP
 
 /-!
 # Frontier CLI
@@ -22,5 +22,29 @@ that module for the full explanation.
 open Lean
 
 namespace Frontier.CLI
+
+/-! ## Entry points -/
+
+/-- Strip a global `--json` flag from anywhere in the argument list. -/
+def takeJsonFlag (args : List String) : Bool × List String :=
+  takeFlag "--json" args
+
+/-- Commands that answer without importing the project environment, which costs several
+seconds. -/
+def runWithoutEnvironment? (args : List String) : Option (IO UInt32) :=
+  let (asJson, rest) := takeJsonFlag args
+  match rest with
+  | [] | ["help"] | ["--help"] | ["-h"] => some (emit asJson .help)
+  | ["policy"] => some (emit asJson .policy)
+  | _ => none
+
+def run (context : Context) (args : List String) : IO UInt32 := do
+  let (asJson, rest) := takeJsonFlag args
+  match rest with
+  | ["serve"] => runServe context
+  | ["mcp"] => MCP.run context
+  | "serve" :: _ => emit asJson (.failure "serve takes no arguments")
+  | "mcp" :: _ => emit asJson (.failure "mcp takes no arguments")
+  | _ => emit asJson (← compute context rest)
 
 end Frontier.CLI

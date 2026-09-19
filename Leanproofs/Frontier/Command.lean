@@ -73,9 +73,9 @@ def catalogJson (audits : Array Audit) (globalErrors : Array String) : Json :=
 /-! ## Commands
 
 Every command computes a `Payload`, and every payload renders two ways: as text for a human at
-a terminal, and as JSON for a program. One dispatch with two renderers — rather than a `--json`
-branch threaded through each command — is what lets `frontier serve` expose the whole CLI over
-a socket without a second implementation of anything.
+a terminal, and as JSON for a program. One dispatch with two renderers avoids a separate machine
+implementation for one-shot commands. The typed session and MCP adapter use their own narrow
+operation registry rather than exposing this CLI dispatch.
 -/
 
 /-- Default elaboration budget for a draft, in heartbeats. Twice Lean's own default: drafts
@@ -147,7 +147,8 @@ def usageLines : Array String := #[
   "frontier graph",
   "frontier policy",
   "frontier export [path]",
-  "frontier serve"
+  "frontier serve",
+  "frontier mcp"
 ]
 
 def helpText : String :=

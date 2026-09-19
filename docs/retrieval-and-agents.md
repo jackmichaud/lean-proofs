@@ -31,8 +31,10 @@ Recommended order, cheapest and highest-value first:
    against an environment imported once instead of once per command. Requests carry correlation,
    provenance, and optional environment pinning. This was the actual blocker: an agent cannot
    iterate against a tool that costs twenty seconds a call and returns column-aligned prose.
-1. **Read-only MCP tools** over that interface. With `serve` in place this is a thin adapter
-   from MCP tool calls to request lines, not new infrastructure.
+1. **Done. MCP tools** over that interface. `frontier mcp` is a thin MCP 2025-11-25 stdio
+   adapter over the typed operations, not a second execution system. Discovery is generated from
+   the same operation contracts as `capabilities.get`; calls retain environment pinning,
+   attempt ownership, provenance, event recording, axiom policy, and replay checks.
 2. **Lexical and symbolic retrieval over mathlib.** Largely done. `frontier suggest` does
    cosine-normalized IDF-weighted constant overlap with conclusions weighted above hypotheses,
    over a registry id or an arbitrary elaborated `--goal`, against all of mathlib. Note that
@@ -103,16 +105,16 @@ Lean accepts a proof term or tactic script that uses it.
 
 ## MCP Agent Boundary
 
-Frontier can expose an MCP server so any capable agent can inspect the theorem library, retrieve
-premises, attempt inference, and submit candidate proofs. Useful tools include:
+`frontier mcp` exposes every current typed operation as a discoverable MCP tool: environment and
+capability inspection, declaration search, durable attempt creation and history, premise
+retrieval, batch tactic evaluation, proof-state inspection, and checked rehydration. It uses the
+MCP 2025-11-25 lifecycle and newline-delimited JSON-RPC stdio transport. The adapter derives actor
+provenance from `clientInfo`, preserves JSON-RPC ids, emits no non-protocol stdout, and routes every
+call through `computeTyped`.
 
-- `search_theorems`: find declarations by name, text, namespace, topic, or tag
-- `retrieve_premises`: rank likely premises for a formal goal
-- `show_result`: inspect statement, certificate, status, dependencies, and axioms
-- `show_dependencies`: traverse direct or transitive dependency neighborhoods
-- `submit_proof`: place candidate Lean code into a staging queue
-- `validate_submission`: run Lean and return errors, goals, dependencies, and axioms
-- `promote_submission`: convert a validated submission into a curated catalog entry
+Submission, validation, and promotion tools remain intentionally absent. They require the
+sandbox boundary described below; the local MCP process must not be mistaken for a remote
+multi-tenant authority.
 
 MCP tools should be designed for least authority. External agents should not directly mutate the
 trusted catalog. They submit candidates into staging; Frontier validates them; a human or policy
@@ -249,7 +251,9 @@ Ordered by value per unit of work, following the build order above.
    `web/data/work.json` on every mutation and displayed by the workspace separately from
    audited results. This is the local half of staging; it needs no sandbox because it accepts
    nothing from anywhere. See the section above for why that is not the same as milestone 8.
-5. Add an MCP server over `frontier serve`. A thin adapter now, not new infrastructure.
+5. **Done.** Add an MCP 2025-11-25 stdio server over the typed operation layer. Its tool schemas
+   and native capability records derive from one operation registry, while execution continues
+   through the existing typed protocol.
 6. Extend lexical and symbolic ranking beyond the current IDF-weighted constant overlap, and
    record its hit rate so later work has a baseline.
 7. **Done.** Retain the in-process `Elab.Tactic` proof-state interaction. It reuses the warm

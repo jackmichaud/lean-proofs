@@ -19,6 +19,147 @@ namespace Frontier.API
 
 def version : String := "frontier.agent/v1"
 
+inductive AttemptRequirement where
+  | none
+  | required
+  | requiredNew
+  deriving BEq, DecidableEq, Inhabited, Repr
+
+def AttemptRequirement.toString : AttemptRequirement → String
+  | .none => "none"
+  | .required => "required"
+  | .requiredNew => "required-new"
+
+structure OperationContract where
+  operation : String
+  description : String
+  attempt : AttemptRequirement
+  effect : String
+  requiredParams : Array String := #[]
+  optionalParams : Array String := #[]
+  properties : List (String × Json) := []
+  extra : List (String × Json) := []
+
+private def stringProperty (description : String) : Json :=
+  Json.mkObj [("type", toJson "string"), ("description", toJson description)]
+
+private def positiveIntegerProperty (description : String) : Json :=
+  Json.mkObj [("type", toJson "integer"), ("minimum", toJson (1 : Nat)),
+    ("description", toJson description)]
+
+private def booleanProperty (description : String) : Json :=
+  Json.mkObj [("type", toJson "boolean"), ("description", toJson description)]
+
+private def actionSchema : Json := Json.mkObj [
+  ("type", toJson "object"),
+  ("additionalProperties", toJson false),
+  ("properties", Json.mkObj [
+    ("id", stringProperty "Caller-chosen action correlation id."),
+    ("tactic", stringProperty "Lean tactic block to evaluate."),
+    ("transitionId", stringProperty "Durable id for this proposed transition."),
+    ("retrievalIds", Json.mkObj [("type", toJson "array"),
+      ("items", Json.mkObj [("type", toJson "string")]),
+      ("description", toJson "Premise retrievals used to propose this action.")])]),
+  ("required", toJson #["id", "tactic", "transitionId"])]
+
+/-- The operation registry is the source for both native capability discovery and MCP tools. -/
+def operationContracts : Array OperationContract := #[
+  { operation := "capabilities.get"
+    description := "Describe Frontier's typed operations and trust boundary."
+    attempt := .none, effect := "read" },
+  { operation := "environment.describe"
+    description := "Describe the loaded Lean, mathlib, catalog, and policy environment."
+    attempt := .none, effect := "read" },
+  { operation := "research.attempt.create"
+    description := "Create a durable research attempt, optionally opening its Lean proposition."
+    attempt := .requiredNew, effect := "append"
+    requiredParams := #["title", "goal"]
+    optionalParams := #["proposition", "note", "parentAttemptId"]
+    properties := [
+      ("title", stringProperty "Short title for this research attempt."),
+      ("goal", stringProperty "Human-readable research objective."),
+      ("proposition", stringProperty "Exact Lean proposition to open as a proof state."),
+      ("note", stringProperty "Optional research note."),
+      ("parentAttemptId", stringProperty "Attempt from which this work branches.")] },
+  { operation := "research.attempt.list"
+    description := "List durable research attempts and their materialized state."
+    attempt := .none, effect := "read" },
+  { operation := "research.attempt.get"
+    description := "Read one attempt's summary and complete append-only event history."
+    attempt := .required, effect := "read" },
+  { operation := "declarations.search"
+    description := "Search declarations in the loaded Lean environment by name."
+    attempt := .none, effect := "read"
+    requiredParams := #["query"]
+    optionalParams := #["limit", "includeDefinitions"]
+    properties := [
+      ("query", stringProperty "Declaration name fragment to search for."),
+      ("limit", positiveIntegerProperty "Maximum results to return."),
+      ("includeDefinitions", booleanProperty "Include definitions as well as theorems.")] },
+  { operation := "premises.retrieve"
+    description := "Rank likely Lean premises for a goal and record the retrieval."
+    attempt := .required, effect := "append"
+    requiredParams := #["goal", "retrievalId"]
+    optionalParams := #["limit"]
+    properties := [
+      ("goal", stringProperty "Lean proposition for which to retrieve premises."),
+      ("retrievalId", stringProperty "Durable caller-chosen retrieval id."),
+      ("limit", positiveIntegerProperty "Maximum premises to return.")] },
+  { operation := "proof.evaluateBatch"
+    description := "Evaluate independent Lean tactic candidates from one durable proof state."
+    attempt := .required, effect := "append"
+    requiredParams := #["parentStateId", "actions"]
+    optionalParams := #["heartbeats"]
+    properties := [
+      ("parentStateId", stringProperty "Durable attempt-scoped parent proof state id."),
+      ("actions", Json.mkObj [("type", toJson "array"), ("minItems", toJson (1 : Nat)),
+        ("items", actionSchema), ("description", toJson "Independent tactics to evaluate.")]),
+      ("heartbeats", positiveIntegerProperty "Lean heartbeat budget per action.")]
+    extra := [("actionRequired", toJson #["id", "tactic", "transitionId"]),
+      ("actionOptional", toJson #["retrievalIds"])] },
+  { operation := "proof.inspectState"
+    description := "Inspect a live attempt-scoped Lean proof state."
+    attempt := .required, effect := "read"
+    requiredParams := #["stateId"]
+    optionalParams := #["heartbeats"]
+    properties := [
+      ("stateId", stringProperty "Durable attempt-scoped proof state id."),
+      ("heartbeats", positiveIntegerProperty "Lean heartbeat budget.")] },
+  { operation := "proof.rehydrate"
+    description := "Replay checked attempt history to restore a durable proof state."
+    attempt := .required, effect := "session"
+    requiredParams := #["stateId"]
+    optionalParams := #["heartbeats"]
+    properties := [
+      ("stateId", stringProperty "Durable attempt-scoped proof state id."),
+      ("heartbeats", positiveIntegerProperty "Lean heartbeat budget for replay.")] }
+]
+
+def operationContract? (operation : String) : Option OperationContract :=
+  operationContracts.find? (·.operation == operation)
+
+def OperationContract.inputSchema (contract : OperationContract) : Json :=
+  let transportProperties :=
+    [("environment", stringProperty "Optional loaded-environment fingerprint to require")] ++
+    if contract.attempt == .none then [] else
+      [("attemptId", stringProperty "Durable research attempt id")]
+  let required := if contract.attempt == .none then contract.requiredParams else
+    #["attemptId"] ++ contract.requiredParams
+  Json.mkObj [
+    ("type", toJson "object"),
+    ("additionalProperties", toJson false),
+    ("properties", Json.mkObj (transportProperties ++ contract.properties)),
+    ("required", toJson required)]
+
+private def OperationContract.capabilityJson (contract : OperationContract) : Json :=
+  Json.mkObj ([
+    ("operation", toJson contract.operation),
+    ("attempt", toJson contract.attempt.toString),
+    ("effect", toJson contract.effect),
+    ("requiredParams", toJson contract.requiredParams),
+    ("optionalParams", toJson contract.optionalParams)
+  ] ++ contract.extra)
+
 /-- Stable machine-readable failures. New cases may be added without changing existing codes. -/
 inductive ErrorCode where
   | invalidRequest
@@ -112,6 +253,11 @@ private def exactObject (json : Json) (required optional : List String)
     throw { code, message := s!"unexpected field(s): {", ".intercalate unexpected}" }
   unless missing.isEmpty do
     throw { code, message := s!"missing field(s): {", ".intercalate missing}" }
+
+private def exactOperationParams (operation : String) (json : Json) : Except Error Unit := do
+  let some contract := operationContract? operation
+    | throw { code := .internalError, message := s!"missing operation contract '{operation}'" }
+  exactObject json contract.requiredParams.toList contract.optionalParams.toList
 
 private def requiredString (json : Json) (key : String) : Except Error String := do
   let value ← json.getObjVal? key |>.mapError fun _ =>
@@ -267,53 +413,13 @@ def failureResponse (context : CLI.Context) (requestId? operation? : Option Stri
 def capabilitiesJson : Json :=
   Json.mkObj [
     ("apiVersions", toJson #[version]),
-    ("operations", toJson #["capabilities.get", "environment.describe",
-      "research.attempt.create", "research.attempt.list", "research.attempt.get",
-      "declarations.search", "premises.retrieve", "proof.evaluateBatch", "proof.inspectState",
-      "proof.rehydrate"]),
+    ("operations", toJson (operationContracts.map (·.operation))),
     ("envelope", Json.mkObj [
       ("required", toJson #["apiVersion", "requestId", "operation", "params", "provenance"]),
       ("optional", toJson #["environment", "attemptId"]),
       ("provenanceRequired", toJson #["kind", "name", "runId"]),
       ("provenanceOptional", toJson #["model", "configuration"])]),
-    ("contracts", Json.arr #[
-      Json.mkObj [("operation", toJson "capabilities.get"), ("attempt", toJson "none"),
-        ("effect", toJson "read"), ("requiredParams", toJson (#[] : Array String)),
-        ("optionalParams", toJson (#[] : Array String))],
-      Json.mkObj [("operation", toJson "environment.describe"), ("attempt", toJson "none"),
-        ("effect", toJson "read"), ("requiredParams", toJson (#[] : Array String)),
-        ("optionalParams", toJson (#[] : Array String))],
-      Json.mkObj [("operation", toJson "research.attempt.create"),
-        ("attempt", toJson "required-new"), ("effect", toJson "append"),
-        ("requiredParams", toJson #["title", "goal"]),
-        ("optionalParams", toJson #["proposition", "note", "parentAttemptId"])],
-      Json.mkObj [("operation", toJson "research.attempt.list"),
-        ("attempt", toJson "none"), ("effect", toJson "read"),
-        ("requiredParams", toJson (#[] : Array String)),
-        ("optionalParams", toJson (#[] : Array String))],
-      Json.mkObj [("operation", toJson "research.attempt.get"),
-        ("attempt", toJson "required"), ("effect", toJson "read"),
-        ("requiredParams", toJson (#[] : Array String)),
-        ("optionalParams", toJson (#[] : Array String))],
-      Json.mkObj [("operation", toJson "declarations.search"), ("attempt", toJson "none"),
-        ("effect", toJson "read"), ("requiredParams", toJson #["query"]),
-        ("optionalParams", toJson #["limit", "includeDefinitions"])],
-      Json.mkObj [("operation", toJson "premises.retrieve"), ("attempt", toJson "required"),
-        ("effect", toJson "append"), ("requiredParams", toJson #["goal", "retrievalId"]),
-        ("optionalParams", toJson #["limit"])],
-      Json.mkObj [("operation", toJson "proof.evaluateBatch"), ("attempt", toJson "required"),
-        ("effect", toJson "append"),
-        ("requiredParams", toJson #["parentStateId", "actions"]),
-        ("optionalParams", toJson #["heartbeats"]),
-        ("actionRequired", toJson #["id", "tactic", "transitionId"]),
-        ("actionOptional", toJson #["retrievalIds"])],
-      Json.mkObj [("operation", toJson "proof.inspectState"), ("attempt", toJson "required"),
-        ("effect", toJson "read"), ("requiredParams", toJson #["stateId"]),
-        ("optionalParams", toJson #["heartbeats"])],
-      Json.mkObj [("operation", toJson "proof.rehydrate"), ("attempt", toJson "required"),
-        ("effect", toJson "session"), ("requiredParams", toJson #["stateId"]),
-        ("optionalParams", toJson #["heartbeats"])]
-    ]),
+    ("contracts", Json.arr (operationContracts.map (·.capabilityJson))),
     ("researchHistory", Json.mkObj [
       ("schemaVersion", toJson (3 : Nat)), ("trusted", toJson false),
       ("appendOnly", toJson true)]),
@@ -353,7 +459,7 @@ def validateRequest (context : CLI.Context) (request : Request) : Except Error U
       }
 
 def emptyParams (request : Request) : Except Error Unit :=
-  exactObject request.params [] []
+  exactOperationParams request.operation request.params
 
 def requireAttemptId (request : Request) : Except Error Research.AttemptId :=
   match request.attemptId? with
@@ -375,7 +481,7 @@ private def optionalParamString (json : Json) (key : String) : Except Error (Opt
           else .ok (some text)
 
 def attemptCreateParams (request : Request) : Except Error AttemptCreateParams := do
-  exactObject request.params ["title", "goal"] ["proposition", "note", "parentAttemptId"]
+  exactOperationParams "research.attempt.create" request.params
   let title ← paramString request.params "title"
   let goal ← paramString request.params "goal"
   if title.trimAscii.isEmpty then fail .invalidParams "field 'title' must not be blank"
@@ -393,7 +499,7 @@ def attemptCreateParams (request : Request) : Except Error AttemptCreateParams :
   }
 
 def searchParams (request : Request) : Except Error SearchParams := do
-  exactObject request.params ["query"] ["limit", "includeDefinitions"]
+  exactOperationParams "declarations.search" request.params
   let query ← paramString request.params "query"
   if query.trimAscii.isEmpty then fail .invalidParams "field 'query' must not be blank"
   let limit ← optionalNat request.params "limit" CLI.defaultSearchLimit
@@ -405,7 +511,7 @@ def searchParams (request : Request) : Except Error SearchParams := do
   }
 
 def premiseParams (request : Request) : Except Error PremiseParams := do
-  exactObject request.params ["goal", "retrievalId"] ["limit"]
+  exactOperationParams "premises.retrieve" request.params
   let goal ← paramString request.params "goal"
   if goal.trimAscii.isEmpty then fail .invalidParams "field 'goal' must not be blank"
   let limit ← optionalNat request.params "limit" CLI.defaultSuggestLimit
@@ -436,7 +542,7 @@ private def batchAction (json : Json) : Except Error BatchAction := do
   return { id, tactic, transitionId, retrievalIds }
 
 def batchParams (request : Request) : Except Error BatchParams := do
-  exactObject request.params ["parentStateId", "actions"] ["heartbeats"]
+  exactOperationParams "proof.evaluateBatch" request.params
   let parentStateId ← proofStateId request.params "parentStateId"
   let values ← (← paramField request.params "actions").getArr? |>.mapError fun _ =>
     { code := .invalidParams, message := "field 'actions' must be an array" }
@@ -453,14 +559,14 @@ def batchParams (request : Request) : Except Error BatchParams := do
   return { parentStateId, actions, heartbeats }
 
 def inspectParams (request : Request) : Except Error InspectParams := do
-  exactObject request.params ["stateId"] ["heartbeats"]
+  exactOperationParams "proof.inspectState" request.params
   let stateId ← proofStateId request.params "stateId"
   let heartbeats ← optionalNat request.params "heartbeats" CLI.defaultTacticHeartbeats
   if heartbeats == 0 then fail .invalidParams "field 'heartbeats' must be positive in a session"
   return { stateId, heartbeats }
 
 def rehydrateParams (request : Request) : Except Error RehydrateParams := do
-  exactObject request.params ["stateId"] ["heartbeats"]
+  exactOperationParams "proof.rehydrate" request.params
   let stateId ← proofStateId request.params "stateId"
   let heartbeats ← optionalNat request.params "heartbeats" CLI.defaultTacticHeartbeats
   if heartbeats == 0 then fail .invalidParams "field 'heartbeats' must be positive in a session"

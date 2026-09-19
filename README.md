@@ -51,6 +51,7 @@ lake exe frontier graph
 lake exe frontier policy
 lake exe frontier export web/data/catalog.json
 lake exe frontier serve
+lake exe frontier mcp
 ```
 
 `check` elaborates a draft Lean file against the compiled environment and reports Lean's
@@ -136,6 +137,18 @@ loaded environment identifier; clients may send it back as `environment` to reje
 execution against a different snapshot. Start with `capabilities.get` to discover the supported
 operations. Legacy argument arrays and bare commands are intentionally rejected. EOF ends the
 session.
+
+MCP clients can use the same operations through the MCP 2025-11-25 stdio transport:
+
+```bash
+lake exe frontier mcp
+```
+
+The server writes no startup banner: stdout contains only newline-delimited JSON-RPC messages.
+Its static tool catalog is generated from the same operation contracts used by
+`capabilities.get`. MCP initialization supplies client provenance; tool arguments carry only the
+operation fields plus optional `environment` pinning and required `attemptId` where applicable.
+Frontier validation failures are returned as MCP tool errors so an agent can revise its call.
 
 Research operations are attempt-scoped. `research.attempt.create` creates the append-only stream
 and may open an initial Lean proposition; `premises.retrieve` records its ranked candidates, and

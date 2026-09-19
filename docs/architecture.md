@@ -198,9 +198,11 @@ system exposes the kernel-audited dependency graph; future proof search should a
 graphs whose edges are Lean-verified transitions. See [graph-model.md](graph-model.md) for the
 knowledge graph, dependency graph, and proof graph boundaries.
 
-Frontier can expose retrieval and submission through MCP without weakening this boundary. Agents
-may search theorem indexes, retrieve candidate premises, and submit Lean code into staging, but
-only Lean-validated and intentionally promoted declarations become trusted catalog knowledge. See
+Frontier exposes its typed research operations through a thin MCP stdio adapter without weakening
+this boundary. Agents may search theorem indexes, retrieve candidate premises, and explore proof
+states, but MCP output and the research journal remain untrusted observations. Future Lean-code
+submission requires an isolated staging boundary, and only Lean-validated and intentionally
+promoted declarations become trusted catalog knowledge. See
 [retrieval-and-agents.md](retrieval-and-agents.md) for the vector retrieval, MCP, submission, and
 web workspace design.
 

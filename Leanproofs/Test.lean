@@ -13,6 +13,7 @@ import Leanproofs.Tests.Knowledge
 import Leanproofs.Tests.API
 import Leanproofs.Tests.ResearchEvents
 import Leanproofs.Tests.Fingerprint
+import Leanproofs.Tests.MCP
 
 /-!
 # Frontier audit test runner
@@ -49,6 +50,7 @@ def run (context : Context) : IO UInt32 := do
   testAPI suite context
   testResearchEvents suite
   testFingerprint suite context
+  testMCP suite context
   let results ← suite.get
   let total := results.passed + results.failures.size
   for failure in results.failures do
